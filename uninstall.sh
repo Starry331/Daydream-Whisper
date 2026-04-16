@@ -4,7 +4,9 @@ set -euo pipefail
 INSTALL_DIR="${DWHISPER_INSTALL_DIR:-${DAYDREAM_INSTALL_DIR:-$HOME/Daydream-Whisper}}"
 DWHISPER_HOME="${DWHISPER_HOME:-${DAYDREAM_HOME:-$HOME/.dwhisper}}"
 LAUNCHER_PATH="${DWHISPER_LAUNCHER_PATH:-${DAYDREAM_LAUNCHER_PATH:-$HOME/.local/bin/dwhisper}}"
-HF_CACHE_DIR="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}"
+DEFAULT_INSTALL_DIR="$HOME/Daydream-Whisper"
+DEFAULT_DWHISPER_HOME="$HOME/.dwhisper"
+DEFAULT_LAUNCHER_PATH="$HOME/.local/bin/dwhisper"
 
 BOLD=$'\033[1m'
 DIM=$'\033[2m'
@@ -63,52 +65,109 @@ remove_path() {
     fi
 }
 
-remove_whisper_cache() {
-    if [[ ! -d "$HF_CACHE_DIR" ]]; then
-        print_warn "Hugging Face cache not found"
+is_safe_directory_target() {
+    local target=$1
+    [[ -n "$target" ]] || return 1
+    [[ "$target" != "/" ]] || return 1
+    [[ "$target" != "$HOME" ]] || return 1
+    [[ "$target" != "$HOME/" ]] || return 1
+    return 0
+}
+
+is_daydream_whisper_checkout() {
+    local target=$1
+
+    [[ -d "$target" ]] || return 1
+    is_safe_directory_target "$target" || return 1
+    [[ -f "$target/pyproject.toml" ]] || return 1
+    grep -q 'name = "daydream-whisper"' "$target/pyproject.toml" 2>/dev/null || return 1
+    [[ -f "$target/dwhisper" || -f "$target/src/dwhisper/cli.py" ]] || return 1
+    return 0
+}
+
+is_daydream_whisper_home() {
+    local target=$1
+    local basename=${target:t}
+
+    [[ -d "$target" ]] || return 1
+    is_safe_directory_target "$target" || return 1
+
+    if [[ "$target" == "$DEFAULT_DWHISPER_HOME" || "$basename" == ".dwhisper" ]]; then
         return 0
     fi
 
-    local found=0
-    local path
-    for path in "$HF_CACHE_DIR"/models--mlx-community--whisper*; do
-        if [[ -e "$path" ]]; then
-            rm -rf "$path"
-            print_step "Removed cached model $path"
-            found=1
-        fi
-    done
+    [[ -f "$target/registry.yaml" || -d "$target/models" ]]
+}
 
-    if [[ $found -eq 0 ]]; then
-        print_warn "No cached mlx-community Whisper models found under $HF_CACHE_DIR"
+launcher_belongs_to_daydream_whisper() {
+    local launcher=$1
+    local target=
+
+    if [[ -L "$launcher" ]]; then
+        target=$(readlink "$launcher")
+        case "$target" in
+            "$INSTALL_DIR"/.venv/bin/dwhisper|"$INSTALL_DIR"/dwhisper)
+                return 0
+                ;;
+            *)
+                ;;
+        esac
+        [[ "$target" == *"/Daydream-Whisper/.venv/bin/dwhisper" ]] && return 0
+        [[ "$target" == *"/Daydream_whisper/dwhisper" ]] && return 0
+        return 1
+    fi
+
+    [[ -f "$launcher" ]] || return 1
+    grep -Eq 'python(3)? -m dwhisper|Daydream-Whisper|/\.venv/bin/dwhisper' "$launcher" 2>/dev/null
+}
+
+remove_checkout_if_managed() {
+    if is_daydream_whisper_checkout "$INSTALL_DIR"; then
+        remove_path "$INSTALL_DIR"
+    else
+        print_warn "Skipped ${INSTALL_DIR}: it does not look like a Daydream Whisper checkout."
+    fi
+}
+
+remove_home_if_managed() {
+    if is_daydream_whisper_home "$DWHISPER_HOME"; then
+        remove_path "$DWHISPER_HOME"
+    else
+        print_warn "Skipped ${DWHISPER_HOME}: it does not look like a dedicated Daydream Whisper home."
+    fi
+}
+
+remove_launcher_if_managed() {
+    if [[ ! -L "$LAUNCHER_PATH" && ! -f "$LAUNCHER_PATH" ]]; then
+        print_warn "$LAUNCHER_PATH not found"
+        return 0
+    fi
+
+    if launcher_belongs_to_daydream_whisper "$LAUNCHER_PATH"; then
+        rm -f "$LAUNCHER_PATH"
+        print_step "Removed $LAUNCHER_PATH"
+    else
+        print_warn "Skipped ${LAUNCHER_PATH}: it does not point to Daydream Whisper."
     fi
 }
 
 main() {
     print_banner
     print "  ${BOLD}Daydream Whisper Uninstaller${RESET}"
-    print "  ${DIM}Removes the local Daydream Whisper CLI, config, launcher, and cached speech models.${RESET}"
+    print "  ${DIM}Removes only this Daydream Whisper checkout, launcher, and config directory.${RESET}"
+    print "  ${DIM}Shared Python environments, Homebrew packages, ffmpeg, portaudio, and Hugging Face caches are left untouched.${RESET}"
     print ""
 
     if confirm "Remove the application checkout at ${INSTALL_DIR}?" y; then
-        remove_path "$INSTALL_DIR"
+        remove_checkout_if_managed
     fi
 
     if confirm "Remove the Daydream Whisper config and local model registry at ${DWHISPER_HOME}?" y; then
-        remove_path "$DWHISPER_HOME"
+        remove_home_if_managed
     fi
 
     if confirm "Remove the launcher symlink at ${LAUNCHER_PATH}?" y; then
-        if [[ -L "$LAUNCHER_PATH" || -f "$LAUNCHER_PATH" ]]; then
-            rm -f "$LAUNCHER_PATH"
-            print_step "Removed $LAUNCHER_PATH"
-        else
-            print_warn "$LAUNCHER_PATH not found"
-        fi
-    fi
-
-    if confirm "Remove cached mlx-community Whisper models from ${HF_CACHE_DIR}?" n; then
-        remove_whisper_cache
+        remove_launcher_if_managed
     fi
 
     print ""
