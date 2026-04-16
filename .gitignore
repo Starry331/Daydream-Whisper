@@ -1,0 +1,13 @@
+.DS_Store
+.claude/
+.daydream/
+.dwhisper/
+.repo-git/
+.venv/
+__pycache__/
+*.pyc
+.eggs/
+*.egg-info/
+build/
+dist/
+src/daydream.egg-info/

@@ -1,0 +1,11 @@
+#!/bin/zsh
+set -euo pipefail
+
+ROOT_DIR="${0:A:h}"
+export PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+
+if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
+    exec "$ROOT_DIR/.venv/bin/python" -m dwhisper "$@"
+fi
+
+exec python3 -m dwhisper "$@"
