@@ -52,10 +52,12 @@ The installer will:
 
 - install `portaudio` and `ffmpeg` when Homebrew is available
 - clone or update the repo into `~/Daydream-Whisper`
-- create a virtual environment
+- recreate an isolated virtual environment inside `~/Daydream-Whisper/.venv`
 - install the package
 - install a `dwhisper` launcher into `~/.local/bin`
 - pull `whisper:base` as the default starter model
+
+The installer only creates `dwhisper`. It does not install, overwrite, or remove the original `daydream` command from Daydream CLI.
 
 Manual install:
 
@@ -67,6 +69,8 @@ source .venv/bin/activate
 pip install -U pip setuptools wheel
 pip install -e .
 ```
+
+Use a dedicated environment for Daydream Whisper. Do not install it into an existing Daydream CLI virtual environment.
 
 Directly from a repo checkout:
 
