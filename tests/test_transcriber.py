@@ -136,6 +136,39 @@ class TranscriberTests(unittest.TestCase):
 
         self.assertEqual(result.text, "Hello world.")
 
+    def test_transcribe_file_can_optionally_postprocess_with_local_text_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "sample.wav"
+            write_wav_file(audio_path, np.zeros(1600, dtype=np.float32), sample_rate=16000)
+
+            transcribe_impl = mock.Mock(
+                return_value={
+                    "text": "helo world",
+                    "language": "en",
+                    "segments": [{"start": 0.0, "end": 1.0, "text": "helo world"}],
+                    "duration": 1.0,
+                }
+            )
+            with mock.patch("dwhisper.transcriber.load_whisper_model", return_value=Path("/models/whisper")), \
+                mock.patch(
+                    "dwhisper.postprocess.OpenAICompatPostProcessor._request",
+                    return_value={"choices": [{"message": {"content": "Hello, world."}}]},
+                ) as postprocess_request:
+                transcriber = WhisperTranscriber("whisper:base", transcribe_impl=transcribe_impl)
+                result = transcriber.transcribe_file(
+                    audio_path,
+                    options=TranscribeOptions(
+                        postprocess=True,
+                        postprocess_model="qwen-local",
+                        postprocess_base_url="http://127.0.0.1:11435/v1",
+                    ),
+                )
+
+        self.assertEqual(result.raw_text, "helo world")
+        self.assertEqual(result.text, "Hello, world.")
+        self.assertTrue(result.postprocess["applied"])
+        postprocess_request.assert_called_once()
+
     def test_fixture_model_bypasses_mlx_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             model_path = write_fake_local_whisper_model(Path(tmpdir) / "fixture-model", fixture=True)

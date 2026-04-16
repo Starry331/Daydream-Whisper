@@ -17,6 +17,12 @@ from dwhisper.config import (
     get_default_model,
     get_default_output_format,
     get_default_overlap_duration,
+    get_default_postprocess_api_key,
+    get_default_postprocess_base_url,
+    get_default_postprocess_enabled,
+    get_default_postprocess_mode,
+    get_default_postprocess_model,
+    get_default_postprocess_timeout,
     get_default_profile,
     get_default_profiles_path,
     get_default_push_to_talk,
@@ -279,6 +285,24 @@ def devices() -> None:
 @click.option("--vocabulary-entry", "vocabulary_entries", multiple=True, help="Vocabulary correction entry in SOURCE=TARGET form.")
 @click.option("--corrections-file", type=click.Path(exists=True, dir_okay=False, path_type=str), default=None, help="Correction rules YAML file.")
 @click.option("--vocabulary-file", type=click.Path(exists=True, dir_okay=False, path_type=str), default=None, help="Vocabulary YAML file.")
+@click.option(
+    "--postprocess/--no-postprocess",
+    default=get_default_postprocess_enabled(),
+    show_default=True,
+    help="Send transcript through an optional local text-model post-processor after Whisper.",
+)
+@click.option("--postprocess-model", default=get_default_postprocess_model(), help="Local text model name for post-processing, for example a Qwen model served separately.")
+@click.option("--postprocess-base-url", default=get_default_postprocess_base_url(), help="OpenAI-compatible local base URL for the post-process model.")
+@click.option("--postprocess-api-key", default=get_default_postprocess_api_key(), show_default=False, help="API key sent to the local post-process endpoint.")
+@click.option(
+    "--postprocess-mode",
+    type=click.Choice(["clean", "summary", "meeting-notes", "speaker-format"], case_sensitive=False),
+    default=get_default_postprocess_mode(),
+    show_default=True,
+    help="How the local text model should rewrite the transcript.",
+)
+@click.option("--postprocess-prompt", default=None, help="Custom prompt template for post-processing. Supports {transcript}, {language}, and {mode}.")
+@click.option("--postprocess-timeout", type=float, default=get_default_postprocess_timeout(), show_default=True, help="Timeout in seconds for the optional local post-process request.")
 @click.option("--output", "-o", "output_path", type=click.Path(dir_okay=False, path_type=str), default=None, help="Write output to a file.")
 @click.option("--verbose", "-v", is_flag=True, help="Show timing and progress details.")
 @click.pass_context
@@ -301,6 +325,13 @@ def transcribe(
     vocabulary_entries: tuple[str, ...],
     corrections_file: str | None,
     vocabulary_file: str | None,
+    postprocess: bool,
+    postprocess_model: str | None,
+    postprocess_base_url: str | None,
+    postprocess_api_key: str,
+    postprocess_mode: str,
+    postprocess_prompt: str | None,
+    postprocess_timeout: float,
     output_path: str | None,
     verbose: bool,
 ) -> None:
@@ -325,6 +356,49 @@ def transcribe(
     resolved_vocabulary_file = vocabulary_file
     if not _parameter_was_explicit(ctx, "vocabulary_file"):
         resolved_vocabulary_file = profile_transcribe.get("vocabulary_path") or _default_file_path(get_default_vocabulary_path())
+    resolved_postprocess = bool(
+        _profile_value(ctx, "postprocess", postprocess, profile_transcribe.get("postprocess"))
+    )
+    resolved_postprocess_model = _profile_value(
+        ctx,
+        "postprocess_model",
+        postprocess_model,
+        profile_transcribe.get("postprocess_model"),
+    )
+    resolved_postprocess_base_url = _profile_value(
+        ctx,
+        "postprocess_base_url",
+        postprocess_base_url,
+        profile_transcribe.get("postprocess_base_url"),
+    )
+    resolved_postprocess_api_key = _profile_value(
+        ctx,
+        "postprocess_api_key",
+        postprocess_api_key,
+        profile_transcribe.get("postprocess_api_key"),
+    )
+    resolved_postprocess_mode = str(
+        _profile_value(
+            ctx,
+            "postprocess_mode",
+            postprocess_mode.lower(),
+            profile_transcribe.get("postprocess_mode") or postprocess_mode.lower(),
+        )
+    ).lower()
+    resolved_postprocess_prompt = _profile_value(
+        ctx,
+        "postprocess_prompt",
+        postprocess_prompt,
+        profile_transcribe.get("postprocess_prompt"),
+    )
+    resolved_postprocess_timeout = float(
+        _profile_value(
+            ctx,
+            "postprocess_timeout",
+            postprocess_timeout,
+            profile_transcribe.get("postprocess_timeout"),
+        )
+    )
 
     options = TranscribeOptions(
         profile=selected_profile.name if selected_profile is not None else profile,
@@ -347,6 +421,13 @@ def transcribe(
         correction=profile_transcribe.get("correction"),
         corrections_path=resolved_corrections_file,
         vocabulary_path=resolved_vocabulary_file,
+        postprocess=resolved_postprocess,
+        postprocess_model=resolved_postprocess_model,
+        postprocess_base_url=resolved_postprocess_base_url,
+        postprocess_api_key=resolved_postprocess_api_key,
+        postprocess_mode=resolved_postprocess_mode,
+        postprocess_prompt=resolved_postprocess_prompt,
+        postprocess_timeout=resolved_postprocess_timeout,
     )
 
     if verbose:
@@ -413,6 +494,24 @@ def transcribe(
 @click.option("--vocabulary-entry", "vocabulary_entries", multiple=True, help="Vocabulary correction entry in SOURCE=TARGET form.")
 @click.option("--corrections-file", type=click.Path(exists=True, dir_okay=False, path_type=str), default=None, help="Correction rules YAML file.")
 @click.option("--vocabulary-file", type=click.Path(exists=True, dir_okay=False, path_type=str), default=None, help="Vocabulary YAML file.")
+@click.option(
+    "--postprocess/--no-postprocess",
+    default=get_default_postprocess_enabled(),
+    show_default=True,
+    help="Send finalized transcript text through an optional local text-model post-processor.",
+)
+@click.option("--postprocess-model", default=get_default_postprocess_model(), help="Local text model name for post-processing.")
+@click.option("--postprocess-base-url", default=get_default_postprocess_base_url(), help="OpenAI-compatible local base URL for the post-process model.")
+@click.option("--postprocess-api-key", default=get_default_postprocess_api_key(), show_default=False, help="API key sent to the local post-process endpoint.")
+@click.option(
+    "--postprocess-mode",
+    type=click.Choice(["clean", "summary", "meeting-notes", "speaker-format"], case_sensitive=False),
+    default=get_default_postprocess_mode(),
+    show_default=True,
+    help="How the local text model should rewrite finalized transcript text.",
+)
+@click.option("--postprocess-prompt", default=None, help="Custom prompt template for post-processing. Supports {transcript}, {language}, and {mode}.")
+@click.option("--postprocess-timeout", type=float, default=get_default_postprocess_timeout(), show_default=True, help="Timeout in seconds for the optional local post-process request.")
 @click.option("--verbose", "-v", is_flag=True, help="Show additional realtime status.")
 @click.pass_context
 @_handle_errors
@@ -440,6 +539,13 @@ def listen(
     vocabulary_entries: tuple[str, ...],
     corrections_file: str | None,
     vocabulary_file: str | None,
+    postprocess: bool,
+    postprocess_model: str | None,
+    postprocess_base_url: str | None,
+    postprocess_api_key: str,
+    postprocess_mode: str,
+    postprocess_prompt: str | None,
+    postprocess_timeout: float,
     verbose: bool,
 ) -> None:
     """Transcribe microphone input in realtime."""
@@ -465,6 +571,49 @@ def listen(
     resolved_vocabulary_file = vocabulary_file
     if not _parameter_was_explicit(ctx, "vocabulary_file"):
         resolved_vocabulary_file = profile_transcribe.get("vocabulary_path") or _default_file_path(get_default_vocabulary_path())
+    resolved_postprocess = bool(
+        _profile_value(ctx, "postprocess", postprocess, profile_transcribe.get("postprocess"))
+    )
+    resolved_postprocess_model = _profile_value(
+        ctx,
+        "postprocess_model",
+        postprocess_model,
+        profile_transcribe.get("postprocess_model"),
+    )
+    resolved_postprocess_base_url = _profile_value(
+        ctx,
+        "postprocess_base_url",
+        postprocess_base_url,
+        profile_transcribe.get("postprocess_base_url"),
+    )
+    resolved_postprocess_api_key = _profile_value(
+        ctx,
+        "postprocess_api_key",
+        postprocess_api_key,
+        profile_transcribe.get("postprocess_api_key"),
+    )
+    resolved_postprocess_mode = str(
+        _profile_value(
+            ctx,
+            "postprocess_mode",
+            postprocess_mode.lower(),
+            profile_transcribe.get("postprocess_mode") or postprocess_mode.lower(),
+        )
+    ).lower()
+    resolved_postprocess_prompt = _profile_value(
+        ctx,
+        "postprocess_prompt",
+        postprocess_prompt,
+        profile_transcribe.get("postprocess_prompt"),
+    )
+    resolved_postprocess_timeout = float(
+        _profile_value(
+            ctx,
+            "postprocess_timeout",
+            postprocess_timeout,
+            profile_transcribe.get("postprocess_timeout"),
+        )
+    )
     options = TranscribeOptions(
         profile=selected_profile.name if selected_profile is not None else profile,
         language=_profile_value(ctx, "language", language, profile_transcribe.get("language")),
@@ -486,6 +635,13 @@ def listen(
         correction=profile_transcribe.get("correction"),
         corrections_path=resolved_corrections_file,
         vocabulary_path=resolved_vocabulary_file,
+        postprocess=resolved_postprocess,
+        postprocess_model=resolved_postprocess_model,
+        postprocess_base_url=resolved_postprocess_base_url,
+        postprocess_api_key=resolved_postprocess_api_key,
+        postprocess_mode=resolved_postprocess_mode,
+        postprocess_prompt=resolved_postprocess_prompt,
+        postprocess_timeout=resolved_postprocess_timeout,
     )
     realtime_config = RealtimeConfig(
         sample_rate=int(_profile_value(ctx, "sample_rate", sample_rate, profile_listen.get("sample_rate"))),

@@ -33,6 +33,13 @@ TRANSCRIBE_PROFILE_FIELDS = {
     "correction",
     "corrections_path",
     "vocabulary_path",
+    "postprocess",
+    "postprocess_model",
+    "postprocess_base_url",
+    "postprocess_api_key",
+    "postprocess_mode",
+    "postprocess_prompt",
+    "postprocess_timeout",
 }
 
 LISTEN_PROFILE_FIELDS = {

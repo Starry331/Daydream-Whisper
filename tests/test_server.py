@@ -103,6 +103,9 @@ class ServerTests(unittest.TestCase):
                     "\"hotwords\": [\"Daydream\"],"
                     "\"vocabulary\": {\"helo\": \"hello\"},"
                     "\"correction\": {\"capitalize_sentences\": true},"
+                    "\"postprocess\": true,"
+                    "\"postprocess_model\": \"qwen-local\","
+                    "\"postprocess_base_url\": \"http://127.0.0.1:11435/v1\","
                     "\"beam_size\": 4"
                     "}"
                 ).encode("utf-8"),
@@ -114,6 +117,9 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(request.options.vocabulary, {"helo": "hello"})
         self.assertEqual(request.options.correction, {"capitalize_sentences": True})
         self.assertEqual(request.options.beam_size, 4)
+        self.assertTrue(request.options.postprocess)
+        self.assertEqual(request.options.postprocess_model, "qwen-local")
+        self.assertEqual(request.options.postprocess_base_url, "http://127.0.0.1:11435/v1")
         self.assertIn("profile", request.provided_options)
 
     def test_state_transcribe_uses_cached_transcriber_and_translation_task(self) -> None:
@@ -206,6 +212,13 @@ class ServerTests(unittest.TestCase):
         state._profile_store.get.return_value = profile
         state._corrections_path = "/tmp/corrections.yaml"
         state._vocabulary_path = "/tmp/vocabulary.yaml"
+        state._postprocess_defaults = {
+            "postprocess": True,
+            "postprocess_model": "qwen-local",
+            "postprocess_base_url": "http://127.0.0.1:11435/v1",
+            "postprocess_mode": "clean",
+            "postprocess_timeout": 18.0,
+        }
         with tempfile.TemporaryDirectory() as tmpdir:
             sample_path = f"{tmpdir}/sample.wav"
             with open(sample_path, "wb") as handle:
@@ -225,6 +238,10 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(options.correction, {"capitalize_sentences": True})
         self.assertEqual(options.corrections_path, "/tmp/corrections.yaml")
         self.assertEqual(options.vocabulary_path, "/tmp/vocabulary.yaml")
+        self.assertTrue(options.postprocess)
+        self.assertEqual(options.postprocess_model, "qwen-local")
+        self.assertEqual(options.postprocess_base_url, "http://127.0.0.1:11435/v1")
+        self.assertEqual(options.postprocess_timeout, 18.0)
 
 
 if __name__ == "__main__":

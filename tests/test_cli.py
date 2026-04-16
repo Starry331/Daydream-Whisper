@@ -111,6 +111,9 @@ class CliTests(unittest.TestCase):
                     "language": "zh",
                     "hotwords": ["Daydream"],
                     "vocabulary": {"helo": "hello"},
+                    "postprocess": True,
+                    "postprocess_model": "qwen-local",
+                    "postprocess_base_url": "http://127.0.0.1:11435/v1",
                 }
                 load_profile.return_value = profile
                 transcriber = transcriber_cls.return_value
@@ -129,6 +132,47 @@ class CliTests(unittest.TestCase):
         self.assertEqual(options.language, "zh")
         self.assertEqual(options.hotwords, ["Daydream"])
         self.assertEqual(options.vocabulary, {"helo": "hello"})
+        self.assertTrue(options.postprocess)
+        self.assertEqual(options.postprocess_model, "qwen-local")
+        self.assertEqual(options.postprocess_base_url, "http://127.0.0.1:11435/v1")
+
+    def test_transcribe_accepts_explicit_postprocess_flags(self) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            with open("sample.wav", "wb") as handle:
+                handle.write(b"RIFF0000WAVE")
+
+            with mock.patch("dwhisper.config.ensure_home"), \
+                mock.patch("dwhisper.cli._load_selected_profile", return_value=None), \
+                mock.patch("dwhisper.transcriber.WhisperTranscriber") as transcriber_cls:
+                transcriber = transcriber_cls.return_value
+                result = mock.Mock()
+                result.render.return_value = "cleaned text"
+                result.duration = 1.0
+                result.processing_time = 0.2
+                transcriber.transcribe_file.return_value = result
+
+                invoke = runner.invoke(
+                    cli,
+                    [
+                        "transcribe",
+                        "sample.wav",
+                        "--postprocess",
+                        "--postprocess-model",
+                        "qwen-local",
+                        "--postprocess-base-url",
+                        "http://127.0.0.1:11435/v1",
+                        "--postprocess-mode",
+                        "summary",
+                    ],
+                )
+
+        self.assertEqual(invoke.exit_code, 0, invoke.output)
+        options = transcriber.transcribe_file.call_args.kwargs["options"]
+        self.assertTrue(options.postprocess)
+        self.assertEqual(options.postprocess_model, "qwen-local")
+        self.assertEqual(options.postprocess_base_url, "http://127.0.0.1:11435/v1")
+        self.assertEqual(options.postprocess_mode, "summary")
 
     def test_listen_command_builds_realtime_config(self) -> None:
         runner = CliRunner()

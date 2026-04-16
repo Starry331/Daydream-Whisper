@@ -35,6 +35,12 @@ DEFAULT_TASK = "transcribe"
 DEFAULT_OUTPUT_FORMAT = "text"
 DEFAULT_PROFILE: str | None = None
 DEFAULT_WORD_TIMESTAMPS = False
+DEFAULT_POSTPROCESS_ENABLED = False
+DEFAULT_POSTPROCESS_MODEL: str | None = None
+DEFAULT_POSTPROCESS_BASE_URL: str | None = None
+DEFAULT_POSTPROCESS_API_KEY = "dwhisper-local"
+DEFAULT_POSTPROCESS_MODE = "clean"
+DEFAULT_POSTPROCESS_TIMEOUT = 30.0
 DEFAULT_AUDIO_DEVICE: str | None = None
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_CHUNK_DURATION = 3.0
@@ -192,6 +198,69 @@ def get_default_word_timestamps() -> bool:
         env_names=("DWHISPER_WORD_TIMESTAMPS", "DAYDREAM_WORD_TIMESTAMPS"),
     )
     return _coerce_bool(value, DEFAULT_WORD_TIMESTAMPS)
+
+
+def get_default_postprocess_enabled() -> bool:
+    value = _config_value(
+        DEFAULT_POSTPROCESS_ENABLED,
+        "postprocess",
+        "enabled",
+        env_names=("DWHISPER_POSTPROCESS", "DAYDREAM_POSTPROCESS"),
+    )
+    return _coerce_bool(value, DEFAULT_POSTPROCESS_ENABLED)
+
+
+def get_default_postprocess_model() -> str | None:
+    value = _config_value(
+        DEFAULT_POSTPROCESS_MODEL,
+        "postprocess",
+        "model",
+        env_names=("DWHISPER_POSTPROCESS_MODEL", "DAYDREAM_POSTPROCESS_MODEL"),
+    )
+    return _coerce_str(value, DEFAULT_POSTPROCESS_MODEL)
+
+
+def get_default_postprocess_base_url() -> str | None:
+    value = _config_value(
+        DEFAULT_POSTPROCESS_BASE_URL,
+        "postprocess",
+        "base_url",
+        env_names=("DWHISPER_POSTPROCESS_BASE_URL", "DAYDREAM_POSTPROCESS_BASE_URL"),
+    )
+    return _coerce_str(value, DEFAULT_POSTPROCESS_BASE_URL)
+
+
+def get_default_postprocess_api_key() -> str:
+    value = _config_value(
+        DEFAULT_POSTPROCESS_API_KEY,
+        "postprocess",
+        "api_key",
+        env_names=("DWHISPER_POSTPROCESS_API_KEY", "DAYDREAM_POSTPROCESS_API_KEY"),
+    )
+    return _coerce_str(value, DEFAULT_POSTPROCESS_API_KEY) or DEFAULT_POSTPROCESS_API_KEY
+
+
+def get_default_postprocess_mode() -> str:
+    value = _coerce_str(
+        _config_value(
+            DEFAULT_POSTPROCESS_MODE,
+            "postprocess",
+            "mode",
+            env_names=("DWHISPER_POSTPROCESS_MODE", "DAYDREAM_POSTPROCESS_MODE"),
+        ),
+        DEFAULT_POSTPROCESS_MODE,
+    ) or DEFAULT_POSTPROCESS_MODE
+    return value if value in {"clean", "summary", "meeting-notes", "speaker-format"} else DEFAULT_POSTPROCESS_MODE
+
+
+def get_default_postprocess_timeout() -> float:
+    value = _config_value(
+        DEFAULT_POSTPROCESS_TIMEOUT,
+        "postprocess",
+        "timeout",
+        env_names=("DWHISPER_POSTPROCESS_TIMEOUT", "DAYDREAM_POSTPROCESS_TIMEOUT"),
+    )
+    return max(1.0, _coerce_float(value, DEFAULT_POSTPROCESS_TIMEOUT))
 
 
 def get_default_audio_device() -> str | None:

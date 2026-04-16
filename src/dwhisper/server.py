@@ -20,6 +20,12 @@ from rich.console import Console
 
 from dwhisper.config import (
     get_default_corrections_path,
+    get_default_postprocess_api_key,
+    get_default_postprocess_base_url,
+    get_default_postprocess_enabled,
+    get_default_postprocess_mode,
+    get_default_postprocess_model,
+    get_default_postprocess_timeout,
     get_default_profiles_path,
     get_default_serve_allow_origin,
     get_default_vocabulary_path,
@@ -89,6 +95,7 @@ class SpeechAPIState:
     _profile_store: ProfileStore = field(init=False)
     _corrections_path: str | None = field(init=False, default=None)
     _vocabulary_path: str | None = field(init=False, default=None)
+    _postprocess_defaults: dict[str, Any] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
         self._semaphore = threading.BoundedSemaphore(max(1, self.config.max_concurrency))
@@ -97,6 +104,19 @@ class SpeechAPIState:
         vocabulary_path = get_default_vocabulary_path()
         self._corrections_path = str(corrections_path) if corrections_path.exists() else None
         self._vocabulary_path = str(vocabulary_path) if vocabulary_path.exists() else None
+        postprocess_defaults: dict[str, Any] = {}
+        if get_default_postprocess_enabled():
+            postprocess_defaults["postprocess"] = True
+        postprocess_model = get_default_postprocess_model()
+        postprocess_base_url = get_default_postprocess_base_url()
+        if postprocess_model:
+            postprocess_defaults["postprocess_model"] = postprocess_model
+        if postprocess_base_url:
+            postprocess_defaults["postprocess_base_url"] = postprocess_base_url
+        postprocess_defaults["postprocess_api_key"] = get_default_postprocess_api_key()
+        postprocess_defaults["postprocess_mode"] = get_default_postprocess_mode()
+        postprocess_defaults["postprocess_timeout"] = get_default_postprocess_timeout()
+        self._postprocess_defaults = postprocess_defaults
 
     def _normalize_model(self, requested_model: str | None) -> str:
         model = (requested_model or self.config.model).strip()
@@ -213,6 +233,11 @@ class SpeechAPIState:
         if default_paths:
             options = options.merged_with_overrides(
                 default_paths,
+                protected_fields=request.provided_options,
+            )
+        if self._postprocess_defaults:
+            options = options.merged_with_overrides(
+                self._postprocess_defaults,
                 protected_fields=request.provided_options,
             )
 
@@ -545,6 +570,12 @@ def parse_speech_api_request(
         "beam_size": lambda: _to_int(_payload_scalar(payload, "beam_size"), None),
         "patience": lambda: _to_float(_payload_scalar(payload, "patience"), 0.0),
         "profile": lambda: _payload_scalar(payload, "profile"),
+        "postprocess_model": lambda: _payload_scalar(payload, "postprocess_model"),
+        "postprocess_base_url": lambda: _payload_scalar(payload, "postprocess_base_url"),
+        "postprocess_api_key": lambda: _payload_scalar(payload, "postprocess_api_key"),
+        "postprocess_mode": lambda: _payload_scalar(payload, "postprocess_mode"),
+        "postprocess_prompt": lambda: _payload_scalar(payload, "postprocess_prompt"),
+        "postprocess_timeout": lambda: _to_float(_payload_scalar(payload, "postprocess_timeout"), 30.0),
     }
     for field_name, parser in scalar_option_parsers.items():
         aliases = {
@@ -555,6 +586,9 @@ def parse_speech_api_request(
             provided_options.add(field_name)
             option_kwargs[field_name] = parser()
 
+    if _payload_scalar(payload, "postprocess") is not None:
+        provided_options.add("postprocess")
+        option_kwargs["postprocess"] = _to_bool(_payload_scalar(payload, "postprocess"), False)
     if _payload_scalar(payload, "word_timestamps") is not None or "word" in timestamp_values:
         provided_options.add("word_timestamps")
         option_kwargs["word_timestamps"] = _to_bool(_payload_scalar(payload, "word_timestamps"), False) or ("word" in timestamp_values)

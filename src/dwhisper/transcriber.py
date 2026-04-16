@@ -21,6 +21,7 @@ import numpy as np
 from dwhisper.audio import load_audio_file, write_wav_file
 from dwhisper.correction import CorrectionConfig, TranscriptCorrector, load_correction_config
 from dwhisper.models import ensure_runtime_model, validate_runtime_model
+from dwhisper.postprocess import OpenAICompatPostProcessor, PostProcessOptions
 from dwhisper.utils import format_srt, format_vtt
 
 
@@ -76,6 +77,13 @@ class TranscribeOptions:
     correction: dict[str, Any] | None = None
     corrections_path: str | None = None
     vocabulary_path: str | None = None
+    postprocess: bool = False
+    postprocess_model: str | None = None
+    postprocess_base_url: str | None = None
+    postprocess_api_key: str | None = None
+    postprocess_mode: str = "clean"
+    postprocess_prompt: str | None = None
+    postprocess_timeout: float = 30.0
 
     def __post_init__(self) -> None:
         self.task = str(self.task).strip().lower() or "transcribe"
@@ -136,6 +144,13 @@ class TranscribeOptions:
             "correction": copy.deepcopy(self.correction) if self.correction is not None else None,
             "corrections_path": self.corrections_path,
             "vocabulary_path": self.vocabulary_path,
+            "postprocess": self.postprocess,
+            "postprocess_model": self.postprocess_model,
+            "postprocess_base_url": self.postprocess_base_url,
+            "postprocess_api_key": self.postprocess_api_key,
+            "postprocess_mode": self.postprocess_mode,
+            "postprocess_prompt": self.postprocess_prompt,
+            "postprocess_timeout": self.postprocess_timeout,
         }
 
     def extra_mlx_kwargs(self) -> dict[str, Any]:
@@ -206,6 +221,21 @@ class TranscribeOptions:
             return None
         return TranscriptCorrector(config=config)
 
+    def build_postprocessor(self) -> OpenAICompatPostProcessor | None:
+        if not self.postprocess:
+            return None
+        return OpenAICompatPostProcessor(
+            PostProcessOptions(
+                enabled=self.postprocess,
+                model=self.postprocess_model,
+                base_url=self.postprocess_base_url,
+                api_key=self.postprocess_api_key,
+                mode=self.postprocess_mode,
+                prompt=self.postprocess_prompt,
+                timeout=self.postprocess_timeout,
+            )
+        )
+
 
 @dataclass(slots=True)
 class TranscribeResult:
@@ -215,6 +245,8 @@ class TranscribeResult:
     duration: float = 0.0
     processing_time: float = 0.0
     source: str | None = None
+    raw_text: str | None = None
+    postprocess: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -224,6 +256,8 @@ class TranscribeResult:
             "duration": self.duration,
             "processing_time": self.processing_time,
             "source": self.source,
+            "raw_text": self.raw_text,
+            "postprocess": self.postprocess,
         }
 
     def render(self, output_format: str = "text") -> str:
@@ -339,15 +373,16 @@ class WhisperTranscriber:
     def _prepare_options(
         self,
         options: TranscribeOptions,
-    ) -> tuple[TranscribeOptions, TranscriptCorrector | None]:
+    ) -> tuple[TranscribeOptions, TranscriptCorrector | None, OpenAICompatPostProcessor | None]:
         corrector = options.build_corrector()
+        postprocessor = options.build_postprocessor()
         if corrector is None:
-            return options, None
+            return options, None, postprocessor
 
         biased_prompt = corrector.biased_initial_prompt(options.initial_prompt)
         if biased_prompt == options.initial_prompt:
-            return options, corrector
-        return dataclasses.replace(options, initial_prompt=biased_prompt), corrector
+            return options, corrector, postprocessor
+        return dataclasses.replace(options, initial_prompt=biased_prompt), corrector, postprocessor
 
     def _worker_command(self, request_path: Path, response_path: Path) -> list[str]:
         return [
@@ -605,7 +640,7 @@ class WhisperTranscriber:
         options: TranscribeOptions | None = None,
     ) -> TranscribeResult:
         options = options or TranscribeOptions()
-        options, corrector = self._prepare_options(options)
+        options, corrector, postprocessor = self._prepare_options(options)
         audio_path = Path(path).expanduser()
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
@@ -615,6 +650,8 @@ class WhisperTranscriber:
         result = self._coerce_result(payload, started_at=started_at, source=str(audio_path))
         if corrector is not None:
             corrector.apply(result)
+        if postprocessor is not None:
+            postprocessor.apply(result)
         return result
 
     def transcribe_samples(
@@ -625,7 +662,7 @@ class WhisperTranscriber:
         options: TranscribeOptions | None = None,
     ) -> TranscribeResult:
         options = options or TranscribeOptions()
-        options, corrector = self._prepare_options(options)
+        options, corrector, postprocessor = self._prepare_options(options)
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
             temp_path = Path(handle.name)
 
@@ -636,6 +673,8 @@ class WhisperTranscriber:
             result = self._coerce_result(payload, started_at=started_at, source="live-audio")
             if corrector is not None:
                 corrector.apply(result)
+            if postprocessor is not None:
+                postprocessor.apply(result)
             return result
         finally:
             temp_path.unlink(missing_ok=True)
