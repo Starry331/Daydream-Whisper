@@ -25,7 +25,7 @@ class ConfigTests(unittest.TestCase):
                 "  word_timestamps: true\n"
                 "postprocess:\n"
                 "  enabled: true\n"
-                "  model: qwen3.5:0.8b\n"
+                "  model: local-mm-model\n"
                 "  base_url: http://127.0.0.1:11435/v1\n"
                 "  api_key: test-key\n"
                 "  mode: summary\n"
@@ -73,7 +73,7 @@ class ConfigTests(unittest.TestCase):
                 self.assertEqual(config.get_default_output_format(), "vtt")
                 self.assertTrue(config.get_default_word_timestamps())
                 self.assertTrue(config.get_default_postprocess_enabled())
-                self.assertEqual(config.get_default_postprocess_model(), "qwen3.5:0.8b")
+                self.assertEqual(config.get_default_postprocess_model(), "local-mm-model")
                 self.assertEqual(config.get_default_postprocess_base_url(), "http://127.0.0.1:11435/v1")
                 self.assertEqual(config.get_default_postprocess_api_key(), "test-key")
                 self.assertEqual(config.get_default_postprocess_mode(), "summary")
@@ -113,7 +113,7 @@ class ConfigTests(unittest.TestCase):
                     "DAYDREAM_LANGUAGE": "ja",
                     "DAYDREAM_PUSH_TO_TALK": "true",
                     "DAYDREAM_POSTPROCESS": "true",
-                    "DAYDREAM_POSTPROCESS_MODEL": "qwen-local",
+                    "DAYDREAM_POSTPROCESS_MODEL": "local-mm-model",
                 },
                 clear=False,
             ):
@@ -122,7 +122,7 @@ class ConfigTests(unittest.TestCase):
                 self.assertEqual(config.get_default_language(), "ja")
                 self.assertTrue(config.get_default_push_to_talk())
                 self.assertTrue(config.get_default_postprocess_enabled())
-                self.assertEqual(config.get_default_postprocess_model(), "qwen-local")
+                self.assertEqual(config.get_default_postprocess_model(), "local-mm-model")
 
     def test_ensure_home_creates_home_and_local_models_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

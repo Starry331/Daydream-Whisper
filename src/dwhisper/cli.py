@@ -44,6 +44,7 @@ from dwhisper.utils import render_transcription_progress
 
 console = Console()
 err_console = Console(stderr=True)
+DEFAULT_LOCAL_POSTPROCESS_BASE_URL = "http://127.0.0.1:11435/v1"
 
 
 def _handle_errors(func):
@@ -95,6 +96,78 @@ def _profile_value(ctx: click.Context, name: str, current: object, profile_value
 def _default_file_path(path: Path) -> str | None:
     expanded = path.expanduser()
     return str(expanded) if expanded.exists() else None
+
+
+def _resolve_postprocess_shortcut(
+    *,
+    ctx: click.Context,
+    profile_transcribe: dict[str, object],
+    with_postprocess_model: str | None,
+    postprocess: bool,
+    postprocess_model: str | None,
+    postprocess_base_url: str | None,
+    postprocess_api_key: str | None,
+    postprocess_mode: str,
+    postprocess_prompt: str | None,
+    postprocess_timeout: float,
+) -> tuple[bool, object, object, object, str, object, float]:
+    shortcut_model = with_postprocess_model.strip() if with_postprocess_model else None
+    shortcut_enabled = bool(shortcut_model)
+    resolved_postprocess = bool(
+        _profile_value(ctx, "postprocess", postprocess or shortcut_enabled, profile_transcribe.get("postprocess"))
+    )
+    resolved_postprocess_model = _profile_value(
+        ctx,
+        "postprocess_model",
+        postprocess_model or shortcut_model,
+        profile_transcribe.get("postprocess_model"),
+    )
+    base_url_current = postprocess_base_url
+    if shortcut_enabled and not _parameter_was_explicit(ctx, "postprocess_base_url") and not base_url_current:
+        base_url_current = DEFAULT_LOCAL_POSTPROCESS_BASE_URL
+    resolved_postprocess_base_url = _profile_value(
+        ctx,
+        "postprocess_base_url",
+        base_url_current,
+        profile_transcribe.get("postprocess_base_url"),
+    )
+    resolved_postprocess_api_key = _profile_value(
+        ctx,
+        "postprocess_api_key",
+        postprocess_api_key,
+        profile_transcribe.get("postprocess_api_key"),
+    )
+    resolved_postprocess_mode = str(
+        _profile_value(
+            ctx,
+            "postprocess_mode",
+            postprocess_mode.lower(),
+            profile_transcribe.get("postprocess_mode") or postprocess_mode.lower(),
+        )
+    ).lower()
+    resolved_postprocess_prompt = _profile_value(
+        ctx,
+        "postprocess_prompt",
+        postprocess_prompt,
+        profile_transcribe.get("postprocess_prompt"),
+    )
+    resolved_postprocess_timeout = float(
+        _profile_value(
+            ctx,
+            "postprocess_timeout",
+            postprocess_timeout,
+            profile_transcribe.get("postprocess_timeout"),
+        )
+    )
+    return (
+        resolved_postprocess,
+        resolved_postprocess_model,
+        resolved_postprocess_base_url,
+        resolved_postprocess_api_key,
+        resolved_postprocess_mode,
+        resolved_postprocess_prompt,
+        resolved_postprocess_timeout,
+    )
 
 
 def _parse_vocabulary_entries(entries: tuple[str, ...]) -> dict[str, str]:
@@ -286,23 +359,32 @@ def devices() -> None:
 @click.option("--corrections-file", type=click.Path(exists=True, dir_okay=False, path_type=str), default=None, help="Correction rules YAML file.")
 @click.option("--vocabulary-file", type=click.Path(exists=True, dir_okay=False, path_type=str), default=None, help="Vocabulary YAML file.")
 @click.option(
+    "--post-model",
+    "--with-postprocess-model",
+    "with_postprocess_model",
+    default=None,
+    help="Shortcut for optional local post-processing. Implies --postprocess and defaults the base URL to http://127.0.0.1:11435/v1.",
+)
+@click.option(
     "--postprocess/--no-postprocess",
     default=get_default_postprocess_enabled(),
     show_default=True,
-    help="Send transcript through an optional local text-model post-processor after Whisper.",
+    help="Send transcript through an optional local text or multimodal post-processor after Whisper.",
 )
-@click.option("--postprocess-model", default=get_default_postprocess_model(), help="Local text model name for post-processing, for example a Qwen model served separately.")
-@click.option("--postprocess-base-url", default=get_default_postprocess_base_url(), help="OpenAI-compatible local base URL for the post-process model.")
-@click.option("--postprocess-api-key", default=get_default_postprocess_api_key(), show_default=False, help="API key sent to the local post-process endpoint.")
+@click.option("--postprocess-model", default=get_default_postprocess_model(), help="Local text or multimodal model name for post-processing.")
+@click.option("--post-url", "--postprocess-base-url", "postprocess_base_url", default=get_default_postprocess_base_url(), help="OpenAI-compatible local base URL for the post-process model.")
+@click.option("--post-key", "--postprocess-api-key", "postprocess_api_key", default=get_default_postprocess_api_key(), show_default=False, help="API key sent to the local post-process endpoint.")
 @click.option(
+    "--post-mode",
     "--postprocess-mode",
+    "postprocess_mode",
     type=click.Choice(["clean", "summary", "meeting-notes", "speaker-format"], case_sensitive=False),
     default=get_default_postprocess_mode(),
     show_default=True,
-    help="How the local text model should rewrite the transcript.",
+    help="How the local text or multimodal model should rewrite the transcript.",
 )
-@click.option("--postprocess-prompt", default=None, help="Custom prompt template for post-processing. Supports {transcript}, {language}, and {mode}.")
-@click.option("--postprocess-timeout", type=float, default=get_default_postprocess_timeout(), show_default=True, help="Timeout in seconds for the optional local post-process request.")
+@click.option("--post-prompt", "--postprocess-prompt", "postprocess_prompt", default=None, help="Custom prompt template for post-processing. Supports {transcript}, {language}, and {mode}.")
+@click.option("--post-timeout", "--postprocess-timeout", "postprocess_timeout", type=float, default=get_default_postprocess_timeout(), show_default=True, help="Timeout in seconds for the optional local post-process request.")
 @click.option("--output", "-o", "output_path", type=click.Path(dir_okay=False, path_type=str), default=None, help="Write output to a file.")
 @click.option("--verbose", "-v", is_flag=True, help="Show timing and progress details.")
 @click.pass_context
@@ -325,6 +407,7 @@ def transcribe(
     vocabulary_entries: tuple[str, ...],
     corrections_file: str | None,
     vocabulary_file: str | None,
+    with_postprocess_model: str | None,
     postprocess: bool,
     postprocess_model: str | None,
     postprocess_base_url: str | None,
@@ -356,48 +439,25 @@ def transcribe(
     resolved_vocabulary_file = vocabulary_file
     if not _parameter_was_explicit(ctx, "vocabulary_file"):
         resolved_vocabulary_file = profile_transcribe.get("vocabulary_path") or _default_file_path(get_default_vocabulary_path())
-    resolved_postprocess = bool(
-        _profile_value(ctx, "postprocess", postprocess, profile_transcribe.get("postprocess"))
-    )
-    resolved_postprocess_model = _profile_value(
-        ctx,
-        "postprocess_model",
-        postprocess_model,
-        profile_transcribe.get("postprocess_model"),
-    )
-    resolved_postprocess_base_url = _profile_value(
-        ctx,
-        "postprocess_base_url",
-        postprocess_base_url,
-        profile_transcribe.get("postprocess_base_url"),
-    )
-    resolved_postprocess_api_key = _profile_value(
-        ctx,
-        "postprocess_api_key",
-        postprocess_api_key,
-        profile_transcribe.get("postprocess_api_key"),
-    )
-    resolved_postprocess_mode = str(
-        _profile_value(
-            ctx,
-            "postprocess_mode",
-            postprocess_mode.lower(),
-            profile_transcribe.get("postprocess_mode") or postprocess_mode.lower(),
-        )
-    ).lower()
-    resolved_postprocess_prompt = _profile_value(
-        ctx,
-        "postprocess_prompt",
-        postprocess_prompt,
-        profile_transcribe.get("postprocess_prompt"),
-    )
-    resolved_postprocess_timeout = float(
-        _profile_value(
-            ctx,
-            "postprocess_timeout",
-            postprocess_timeout,
-            profile_transcribe.get("postprocess_timeout"),
-        )
+    (
+        resolved_postprocess,
+        resolved_postprocess_model,
+        resolved_postprocess_base_url,
+        resolved_postprocess_api_key,
+        resolved_postprocess_mode,
+        resolved_postprocess_prompt,
+        resolved_postprocess_timeout,
+    ) = _resolve_postprocess_shortcut(
+        ctx=ctx,
+        profile_transcribe=profile_transcribe,
+        with_postprocess_model=with_postprocess_model,
+        postprocess=postprocess,
+        postprocess_model=postprocess_model,
+        postprocess_base_url=postprocess_base_url,
+        postprocess_api_key=postprocess_api_key,
+        postprocess_mode=postprocess_mode,
+        postprocess_prompt=postprocess_prompt,
+        postprocess_timeout=postprocess_timeout,
     )
 
     options = TranscribeOptions(
@@ -495,23 +555,32 @@ def transcribe(
 @click.option("--corrections-file", type=click.Path(exists=True, dir_okay=False, path_type=str), default=None, help="Correction rules YAML file.")
 @click.option("--vocabulary-file", type=click.Path(exists=True, dir_okay=False, path_type=str), default=None, help="Vocabulary YAML file.")
 @click.option(
+    "--post-model",
+    "--with-postprocess-model",
+    "with_postprocess_model",
+    default=None,
+    help="Shortcut for optional local post-processing. Implies --postprocess and defaults the base URL to http://127.0.0.1:11435/v1.",
+)
+@click.option(
     "--postprocess/--no-postprocess",
     default=get_default_postprocess_enabled(),
     show_default=True,
-    help="Send finalized transcript text through an optional local text-model post-processor.",
+    help="Send finalized transcript text through an optional local text or multimodal post-processor.",
 )
-@click.option("--postprocess-model", default=get_default_postprocess_model(), help="Local text model name for post-processing.")
-@click.option("--postprocess-base-url", default=get_default_postprocess_base_url(), help="OpenAI-compatible local base URL for the post-process model.")
-@click.option("--postprocess-api-key", default=get_default_postprocess_api_key(), show_default=False, help="API key sent to the local post-process endpoint.")
+@click.option("--postprocess-model", default=get_default_postprocess_model(), help="Local text or multimodal model name for post-processing.")
+@click.option("--post-url", "--postprocess-base-url", "postprocess_base_url", default=get_default_postprocess_base_url(), help="OpenAI-compatible local base URL for the post-process model.")
+@click.option("--post-key", "--postprocess-api-key", "postprocess_api_key", default=get_default_postprocess_api_key(), show_default=False, help="API key sent to the local post-process endpoint.")
 @click.option(
+    "--post-mode",
     "--postprocess-mode",
+    "postprocess_mode",
     type=click.Choice(["clean", "summary", "meeting-notes", "speaker-format"], case_sensitive=False),
     default=get_default_postprocess_mode(),
     show_default=True,
-    help="How the local text model should rewrite finalized transcript text.",
+    help="How the local text or multimodal model should rewrite finalized transcript text.",
 )
-@click.option("--postprocess-prompt", default=None, help="Custom prompt template for post-processing. Supports {transcript}, {language}, and {mode}.")
-@click.option("--postprocess-timeout", type=float, default=get_default_postprocess_timeout(), show_default=True, help="Timeout in seconds for the optional local post-process request.")
+@click.option("--post-prompt", "--postprocess-prompt", "postprocess_prompt", default=None, help="Custom prompt template for post-processing. Supports {transcript}, {language}, and {mode}.")
+@click.option("--post-timeout", "--postprocess-timeout", "postprocess_timeout", type=float, default=get_default_postprocess_timeout(), show_default=True, help="Timeout in seconds for the optional local post-process request.")
 @click.option("--verbose", "-v", is_flag=True, help="Show additional realtime status.")
 @click.pass_context
 @_handle_errors
@@ -539,6 +608,7 @@ def listen(
     vocabulary_entries: tuple[str, ...],
     corrections_file: str | None,
     vocabulary_file: str | None,
+    with_postprocess_model: str | None,
     postprocess: bool,
     postprocess_model: str | None,
     postprocess_base_url: str | None,
@@ -571,48 +641,25 @@ def listen(
     resolved_vocabulary_file = vocabulary_file
     if not _parameter_was_explicit(ctx, "vocabulary_file"):
         resolved_vocabulary_file = profile_transcribe.get("vocabulary_path") or _default_file_path(get_default_vocabulary_path())
-    resolved_postprocess = bool(
-        _profile_value(ctx, "postprocess", postprocess, profile_transcribe.get("postprocess"))
-    )
-    resolved_postprocess_model = _profile_value(
-        ctx,
-        "postprocess_model",
-        postprocess_model,
-        profile_transcribe.get("postprocess_model"),
-    )
-    resolved_postprocess_base_url = _profile_value(
-        ctx,
-        "postprocess_base_url",
-        postprocess_base_url,
-        profile_transcribe.get("postprocess_base_url"),
-    )
-    resolved_postprocess_api_key = _profile_value(
-        ctx,
-        "postprocess_api_key",
-        postprocess_api_key,
-        profile_transcribe.get("postprocess_api_key"),
-    )
-    resolved_postprocess_mode = str(
-        _profile_value(
-            ctx,
-            "postprocess_mode",
-            postprocess_mode.lower(),
-            profile_transcribe.get("postprocess_mode") or postprocess_mode.lower(),
-        )
-    ).lower()
-    resolved_postprocess_prompt = _profile_value(
-        ctx,
-        "postprocess_prompt",
-        postprocess_prompt,
-        profile_transcribe.get("postprocess_prompt"),
-    )
-    resolved_postprocess_timeout = float(
-        _profile_value(
-            ctx,
-            "postprocess_timeout",
-            postprocess_timeout,
-            profile_transcribe.get("postprocess_timeout"),
-        )
+    (
+        resolved_postprocess,
+        resolved_postprocess_model,
+        resolved_postprocess_base_url,
+        resolved_postprocess_api_key,
+        resolved_postprocess_mode,
+        resolved_postprocess_prompt,
+        resolved_postprocess_timeout,
+    ) = _resolve_postprocess_shortcut(
+        ctx=ctx,
+        profile_transcribe=profile_transcribe,
+        with_postprocess_model=with_postprocess_model,
+        postprocess=postprocess,
+        postprocess_model=postprocess_model,
+        postprocess_base_url=postprocess_base_url,
+        postprocess_api_key=postprocess_api_key,
+        postprocess_mode=postprocess_mode,
+        postprocess_prompt=postprocess_prompt,
+        postprocess_timeout=postprocess_timeout,
     )
     options = TranscribeOptions(
         profile=selected_profile.name if selected_profile is not None else profile,
@@ -706,6 +753,33 @@ def listen(
     show_default=True,
     help="CORS Access-Control-Allow-Origin value for browser-based local integrations.",
 )
+@click.option(
+    "--post-model",
+    "--with-postprocess-model",
+    "with_postprocess_model",
+    default=None,
+    help="Shortcut to enable a local text or multimodal post-process model for all requests handled by this server.",
+)
+@click.option(
+    "--postprocess/--no-postprocess",
+    default=get_default_postprocess_enabled(),
+    show_default=True,
+    help="Enable default transcript post-processing for requests handled by this server.",
+)
+@click.option("--postprocess-model", default=get_default_postprocess_model(), help="Default local text or multimodal model used for post-processing.")
+@click.option("--post-url", "--postprocess-base-url", "postprocess_base_url", default=get_default_postprocess_base_url(), help="Default OpenAI-compatible base URL used for transcript post-processing.")
+@click.option("--post-key", "--postprocess-api-key", "postprocess_api_key", default=get_default_postprocess_api_key(), show_default=False, help="Default API key sent to the local post-process endpoint.")
+@click.option(
+    "--post-mode",
+    "--postprocess-mode",
+    "postprocess_mode",
+    type=click.Choice(["clean", "summary", "meeting-notes", "speaker-format"], case_sensitive=False),
+    default=get_default_postprocess_mode(),
+    show_default=True,
+    help="Default post-process mode applied by the local text or multimodal model.",
+)
+@click.option("--post-prompt", "--postprocess-prompt", "postprocess_prompt", default=None, help="Default custom prompt template for post-processing requests.")
+@click.option("--post-timeout", "--postprocess-timeout", "postprocess_timeout", type=float, default=get_default_postprocess_timeout(), show_default=True, help="Default timeout in seconds for the local post-process request.")
 @_handle_errors
 def serve(
     model: str,
@@ -717,9 +791,34 @@ def serve(
     max_request_bytes: int,
     preload: bool,
     allow_origin: str,
+    with_postprocess_model: str | None,
+    postprocess: bool,
+    postprocess_model: str | None,
+    postprocess_base_url: str | None,
+    postprocess_api_key: str,
+    postprocess_mode: str,
+    postprocess_prompt: str | None,
+    postprocess_timeout: float,
 ) -> None:
     """Serve a speech-to-text HTTP API for local dictation and transcription apps."""
     from dwhisper.server import start_server
+
+    shortcut_model = with_postprocess_model.strip() if with_postprocess_model else None
+    resolved_postprocess = bool(postprocess or shortcut_model)
+    resolved_postprocess_model = postprocess_model or shortcut_model
+    resolved_postprocess_base_url = (
+        postprocess_base_url
+        or (DEFAULT_LOCAL_POSTPROCESS_BASE_URL if shortcut_model else None)
+    )
+    postprocess_defaults = {
+        "postprocess": resolved_postprocess,
+        "postprocess_model": resolved_postprocess_model,
+        "postprocess_base_url": resolved_postprocess_base_url,
+        "postprocess_api_key": postprocess_api_key,
+        "postprocess_mode": postprocess_mode.lower(),
+        "postprocess_prompt": postprocess_prompt,
+        "postprocess_timeout": postprocess_timeout,
+    }
 
     start_server(
         model=model,
@@ -731,6 +830,7 @@ def serve(
         max_request_bytes=max_request_bytes,
         preload=preload,
         allow_origin=allow_origin,
+        postprocess_defaults=postprocess_defaults,
     )
 
 

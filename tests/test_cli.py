@@ -112,7 +112,7 @@ class CliTests(unittest.TestCase):
                     "hotwords": ["Daydream"],
                     "vocabulary": {"helo": "hello"},
                     "postprocess": True,
-                    "postprocess_model": "qwen-local",
+                    "postprocess_model": "local-mm-model",
                     "postprocess_base_url": "http://127.0.0.1:11435/v1",
                 }
                 load_profile.return_value = profile
@@ -133,7 +133,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(options.hotwords, ["Daydream"])
         self.assertEqual(options.vocabulary, {"helo": "hello"})
         self.assertTrue(options.postprocess)
-        self.assertEqual(options.postprocess_model, "qwen-local")
+        self.assertEqual(options.postprocess_model, "local-mm-model")
         self.assertEqual(options.postprocess_base_url, "http://127.0.0.1:11435/v1")
 
     def test_transcribe_accepts_explicit_postprocess_flags(self) -> None:
@@ -159,10 +159,10 @@ class CliTests(unittest.TestCase):
                         "sample.wav",
                         "--postprocess",
                         "--postprocess-model",
-                        "qwen-local",
-                        "--postprocess-base-url",
+                        "local-mm-model",
+                        "--post-url",
                         "http://127.0.0.1:11435/v1",
-                        "--postprocess-mode",
+                        "--post-mode",
                         "summary",
                     ],
                 )
@@ -170,9 +170,73 @@ class CliTests(unittest.TestCase):
         self.assertEqual(invoke.exit_code, 0, invoke.output)
         options = transcriber.transcribe_file.call_args.kwargs["options"]
         self.assertTrue(options.postprocess)
-        self.assertEqual(options.postprocess_model, "qwen-local")
+        self.assertEqual(options.postprocess_model, "local-mm-model")
         self.assertEqual(options.postprocess_base_url, "http://127.0.0.1:11435/v1")
         self.assertEqual(options.postprocess_mode, "summary")
+
+    def test_transcribe_shortcut_enables_generic_postprocess_model(self) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            with open("sample.wav", "wb") as handle:
+                handle.write(b"RIFF0000WAVE")
+
+            with mock.patch("dwhisper.config.ensure_home"), \
+                mock.patch("dwhisper.cli._load_selected_profile", return_value=None), \
+                mock.patch("dwhisper.transcriber.WhisperTranscriber") as transcriber_cls:
+                transcriber = transcriber_cls.return_value
+                result = mock.Mock()
+                result.render.return_value = "cleaned text"
+                result.duration = 1.0
+                result.processing_time = 0.2
+                transcriber.transcribe_file.return_value = result
+
+                invoke = runner.invoke(
+                    cli,
+                    [
+                        "transcribe",
+                        "sample.wav",
+                        "--post-model",
+                        "glm-4.1v",
+                    ],
+                )
+
+        self.assertEqual(invoke.exit_code, 0, invoke.output)
+        options = transcriber.transcribe_file.call_args.kwargs["options"]
+        self.assertTrue(options.postprocess)
+        self.assertEqual(options.postprocess_model, "glm-4.1v")
+        self.assertEqual(options.postprocess_base_url, "http://127.0.0.1:11435/v1")
+
+    def test_transcribe_legacy_shortcut_flag_still_works(self) -> None:
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            with open("sample.wav", "wb") as handle:
+                handle.write(b"RIFF0000WAVE")
+
+            with mock.patch("dwhisper.config.ensure_home"), \
+                mock.patch("dwhisper.cli._load_selected_profile", return_value=None), \
+                mock.patch("dwhisper.transcriber.WhisperTranscriber") as transcriber_cls:
+                transcriber = transcriber_cls.return_value
+                result = mock.Mock()
+                result.render.return_value = "cleaned text"
+                result.duration = 1.0
+                result.processing_time = 0.2
+                transcriber.transcribe_file.return_value = result
+
+                invoke = runner.invoke(
+                    cli,
+                    [
+                        "transcribe",
+                        "sample.wav",
+                        "--with-postprocess-model",
+                        "llava-next",
+                    ],
+                )
+
+        self.assertEqual(invoke.exit_code, 0, invoke.output)
+        options = transcriber.transcribe_file.call_args.kwargs["options"]
+        self.assertTrue(options.postprocess)
+        self.assertEqual(options.postprocess_model, "llava-next")
+        self.assertEqual(options.postprocess_base_url, "http://127.0.0.1:11435/v1")
 
     def test_listen_command_builds_realtime_config(self) -> None:
         runner = CliRunner()
@@ -258,6 +322,38 @@ class CliTests(unittest.TestCase):
             max_request_bytes=777777,
             preload=True,
             allow_origin="*",
+            postprocess_defaults={
+                "postprocess": False,
+                "postprocess_model": None,
+                "postprocess_base_url": None,
+                "postprocess_api_key": "dwhisper-local",
+                "postprocess_mode": "clean",
+                "postprocess_prompt": None,
+                "postprocess_timeout": 30.0,
+            },
+        )
+
+    def test_serve_shortcut_enables_generic_postprocess_model(self) -> None:
+        runner = CliRunner()
+        with mock.patch("dwhisper.config.ensure_home"), mock.patch("dwhisper.server.start_server") as start_server:
+            invoke = runner.invoke(
+                cli,
+                [
+                    "serve",
+                    "--post-model",
+                    "qwen2.5-vl",
+                ],
+            )
+
+        self.assertEqual(invoke.exit_code, 0, invoke.output)
+        self.assertEqual(
+            start_server.call_args.kwargs["postprocess_defaults"]["postprocess_model"],
+            "qwen2.5-vl",
+        )
+        self.assertTrue(start_server.call_args.kwargs["postprocess_defaults"]["postprocess"])
+        self.assertEqual(
+            start_server.call_args.kwargs["postprocess_defaults"]["postprocess_base_url"],
+            "http://127.0.0.1:11435/v1",
         )
 
 

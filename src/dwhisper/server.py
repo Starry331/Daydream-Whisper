@@ -31,6 +31,7 @@ from dwhisper.config import (
     get_default_vocabulary_path,
 )
 from dwhisper.models import ensure_runtime_model, validate_runtime_model
+from dwhisper.postprocess import OpenAICompatPostProcessor, PostProcessOptions
 from dwhisper.profiles import ProfileStore, load_profile_store
 from dwhisper.registry import list_available
 from dwhisper.transcriber import TranscribeOptions, TranscribeResult, WhisperTranscriber
@@ -67,6 +68,14 @@ class SpeechAPIRequest:
 
 
 @dataclass(slots=True)
+class TextPostProcessRequest:
+    text: str
+    language: str | None = None
+    response_format: str = "json"
+    options: PostProcessOptions = field(default_factory=PostProcessOptions)
+
+
+@dataclass(slots=True)
 class SpeechAPIConfig:
     host: str
     port: int
@@ -77,12 +86,14 @@ class SpeechAPIConfig:
     max_request_bytes: int = 50 * 1024 * 1024
     preload: bool = False
     allow_origin: str = "*"
+    postprocess_defaults: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
 class SpeechAPIState:
     config: SpeechAPIConfig
     transcriber_factory: Callable[..., WhisperTranscriber] = WhisperTranscriber
+    postprocessor_factory: Callable[[PostProcessOptions], OpenAICompatPostProcessor] = OpenAICompatPostProcessor
     model_lister: Callable[[], list[tuple[str, str, str]]] = list_available
     _transcribers: dict[str, WhisperTranscriber] = field(default_factory=dict, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
@@ -104,7 +115,11 @@ class SpeechAPIState:
         vocabulary_path = get_default_vocabulary_path()
         self._corrections_path = str(corrections_path) if corrections_path.exists() else None
         self._vocabulary_path = str(vocabulary_path) if vocabulary_path.exists() else None
-        postprocess_defaults: dict[str, Any] = {}
+        postprocess_defaults: dict[str, Any] = {
+            "postprocess_api_key": get_default_postprocess_api_key(),
+            "postprocess_mode": get_default_postprocess_mode(),
+            "postprocess_timeout": get_default_postprocess_timeout(),
+        }
         if get_default_postprocess_enabled():
             postprocess_defaults["postprocess"] = True
         postprocess_model = get_default_postprocess_model()
@@ -113,9 +128,14 @@ class SpeechAPIState:
             postprocess_defaults["postprocess_model"] = postprocess_model
         if postprocess_base_url:
             postprocess_defaults["postprocess_base_url"] = postprocess_base_url
-        postprocess_defaults["postprocess_api_key"] = get_default_postprocess_api_key()
-        postprocess_defaults["postprocess_mode"] = get_default_postprocess_mode()
-        postprocess_defaults["postprocess_timeout"] = get_default_postprocess_timeout()
+        if self.config.postprocess_defaults:
+            postprocess_defaults.update(
+                {
+                    key: value
+                    for key, value in self.config.postprocess_defaults.items()
+                    if value is not None
+                }
+            )
         self._postprocess_defaults = postprocess_defaults
 
     def _normalize_model(self, requested_model: str | None) -> str:
@@ -322,6 +342,54 @@ class SpeechAPIState:
             finally:
                 temp_path.unlink(missing_ok=True)
 
+    def _resolve_postprocess_options(
+        self,
+        request: TextPostProcessRequest,
+    ) -> PostProcessOptions:
+        defaults = {
+            key.replace("postprocess_", ""): value
+            for key, value in self._postprocess_defaults.items()
+            if key.startswith("postprocess_")
+        }
+        defaults["enabled"] = bool(self._postprocess_defaults.get("postprocess"))
+        defaults.update(
+            {
+                "enabled": request.options.enabled,
+                "model": request.options.model,
+                "base_url": request.options.base_url,
+                "api_key": request.options.api_key,
+                "mode": request.options.mode,
+                "prompt": request.options.prompt,
+                "timeout": request.options.timeout,
+            }
+        )
+        resolved = PostProcessOptions(**defaults)
+        if not resolved.is_configured():
+            raise SpeechAPIError(
+                HTTPStatus.BAD_REQUEST,
+                "Post-process route requires a configured local text model. "
+                "Set serve defaults or provide postprocess_model and postprocess_base_url.",
+            )
+        return resolved
+
+    def postprocess_text(self, request: TextPostProcessRequest) -> dict[str, Any]:
+        options = self._resolve_postprocess_options(request)
+        processor = self.postprocessor_factory(options)
+        with self.acquire_slot():
+            processed = processor.process_text(transcript=request.text, language=request.language)
+        return {
+            "text": processed,
+            "raw_text": request.text,
+            "language": request.language,
+            "postprocess": {
+                "enabled": options.enabled,
+                "applied": processed.strip() != request.text.strip(),
+                "mode": options.mode,
+                "model": options.model,
+                "base_url": options.base_url,
+            },
+        }
+
 
 def _to_bool(value: str | None, default: bool = False) -> bool:
     if value is None:
@@ -510,13 +578,11 @@ def _parse_json_payload(body: bytes) -> dict[str, Any]:
     return payload
 
 
-def parse_speech_api_request(
+def _parse_request_payload(
     *,
     content_type: str,
     body: bytes,
-    default_model: str,
-    forced_task: str | None = None,
-) -> SpeechAPIRequest:
+) -> tuple[dict[str, Any], UploadedFile | None]:
     uploaded_file: UploadedFile | None = None
     payload: dict[str, Any]
 
@@ -533,6 +599,17 @@ def parse_speech_api_request(
             HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
             f"Unsupported content type '{content_type}'.",
         )
+    return payload, uploaded_file
+
+
+def parse_speech_api_request(
+    *,
+    content_type: str,
+    body: bytes,
+    default_model: str,
+    forced_task: str | None = None,
+) -> SpeechAPIRequest:
+    payload, uploaded_file = _parse_request_payload(content_type=content_type, body=body)
 
     model_value = _payload_scalar(payload, "model")
     model_provided = model_value is not None
@@ -637,6 +714,57 @@ def parse_speech_api_request(
     )
 
 
+def parse_postprocess_api_request(
+    *,
+    content_type: str,
+    body: bytes,
+    default_options: dict[str, Any] | None = None,
+) -> TextPostProcessRequest:
+    payload, _ = _parse_request_payload(content_type=content_type, body=body)
+
+    text = _payload_scalar(payload, "text", "transcript", "content")
+    if text is None:
+        raise SpeechAPIError(HTTPStatus.BAD_REQUEST, "Post-process request must include text.")
+
+    response_format = (_payload_scalar(payload, "response_format") or "json").strip().lower()
+    if response_format not in {"json", "text"}:
+        raise SpeechAPIError(
+            HTTPStatus.BAD_REQUEST,
+            f"Unsupported response_format '{response_format}'.",
+        )
+
+    option_kwargs: dict[str, Any] = {}
+    for key, value in dict(default_options or {}).items():
+        normalized_key = key.replace("postprocess_", "") if key.startswith("postprocess_") else key
+        if normalized_key == "postprocess":
+            normalized_key = "enabled"
+        option_kwargs[normalized_key] = value
+    if _payload_scalar(payload, "postprocess", "enabled") is not None:
+        option_kwargs["enabled"] = _to_bool(_payload_scalar(payload, "postprocess", "enabled"), False)
+    if _payload_scalar(payload, "model", "postprocess_model") is not None:
+        option_kwargs["model"] = _payload_scalar(payload, "model", "postprocess_model")
+    if _payload_scalar(payload, "base_url", "postprocess_base_url") is not None:
+        option_kwargs["base_url"] = _payload_scalar(payload, "base_url", "postprocess_base_url")
+    if _payload_scalar(payload, "api_key", "postprocess_api_key") is not None:
+        option_kwargs["api_key"] = _payload_scalar(payload, "api_key", "postprocess_api_key")
+    if _payload_scalar(payload, "mode", "postprocess_mode") is not None:
+        option_kwargs["mode"] = _payload_scalar(payload, "mode", "postprocess_mode")
+    if _payload_scalar(payload, "prompt", "postprocess_prompt") is not None:
+        option_kwargs["prompt"] = _payload_scalar(payload, "prompt", "postprocess_prompt")
+    if _payload_scalar(payload, "timeout", "postprocess_timeout") is not None:
+        option_kwargs["timeout"] = _to_float(_payload_scalar(payload, "timeout", "postprocess_timeout"), 30.0)
+
+    if "enabled" not in option_kwargs:
+        option_kwargs["enabled"] = True
+
+    return TextPostProcessRequest(
+        text=text,
+        language=_payload_scalar(payload, "language"),
+        response_format=response_format,
+        options=PostProcessOptions(**option_kwargs),
+    )
+
+
 def build_transcription_response(
     result: TranscribeResult,
     *,
@@ -651,6 +779,17 @@ def build_transcription_response(
     if response_format == "verbose_json":
         return "application/json", json.dumps(result.to_dict(), ensure_ascii=False).encode("utf-8")
     return "application/json", json.dumps({"text": result.text}, ensure_ascii=False).encode("utf-8")
+
+
+def build_postprocess_response(
+    payload: dict[str, Any],
+    *,
+    response_format: str,
+) -> tuple[str, bytes]:
+    text = str(payload.get("text", "")).strip()
+    if response_format == "text":
+        return "text/plain; charset=utf-8", text.encode("utf-8")
+    return "application/json", json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
 def _json_error(status_code: int, message: str) -> bytes:
@@ -776,6 +915,47 @@ def make_handler(state: SpeechAPIState):
                 forced_task = None
             elif parsed.path == "/v1/audio/translations":
                 forced_task = "translate"
+            elif parsed.path in {"/v1/text/postprocess", "/v1/postprocess"}:
+                try:
+                    body = self._read_body()
+                    content_type = self.headers.get("Content-Type", "application/octet-stream")
+                    request = parse_postprocess_api_request(
+                        content_type=content_type,
+                        body=body,
+                        default_options=state._postprocess_defaults,
+                    )
+                    payload = state.postprocess_text(request)
+                    response_content_type, response_body = build_postprocess_response(
+                        payload,
+                        response_format=request.response_format,
+                    )
+                    processing_ms = int((time.perf_counter() - started_at) * 1000)
+                    state.record_success(processing_ms / 1000.0)
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", response_content_type)
+                    self.send_header("Content-Length", str(len(response_body)))
+                    self.send_header("X-Daydream-Processing-Ms", str(processing_ms))
+                    self._write_common_headers(
+                        request_id=request_id,
+                        model=str(payload.get("postprocess", {}).get("model") or state.config.model),
+                    )
+                    self.end_headers()
+                    self.wfile.write(response_body)
+                except SpeechAPIError as exc:
+                    state.record_failure()
+                    self._send(
+                        exc.status_code,
+                        _json_error(exc.status_code, exc.message),
+                        request_id=request_id,
+                    )
+                except Exception as exc:
+                    state.record_failure()
+                    self._send(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        _json_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc)),
+                        request_id=request_id,
+                    )
+                return
             else:
                 self._send(HTTPStatus.NOT_FOUND, _json_error(HTTPStatus.NOT_FOUND, "Route not found."))
                 return
@@ -838,6 +1018,7 @@ def start_server(
     max_request_bytes: int = 50 * 1024 * 1024,
     preload: bool = False,
     allow_origin: str | None = None,
+    postprocess_defaults: dict[str, Any] | None = None,
 ) -> None:
     if port <= 0 or port > 65535:
         raise ValueError("port must be between 1 and 65535.")
@@ -859,6 +1040,7 @@ def start_server(
             max_request_bytes=max_request_bytes,
             preload=preload,
             allow_origin=(allow_origin or get_default_serve_allow_origin()).strip() or "*",
+            postprocess_defaults=dict(postprocess_defaults or {}),
         )
     )
     resolved_model = ensure_runtime_model(model, auto_pull=auto_pull, register_alias=False)
@@ -873,9 +1055,14 @@ def start_server(
     console.print(f"[dim]Max concurrency:[/] {max_concurrency}")
     console.print(f"[dim]Preload:[/] {'enabled' if preload else 'disabled'}")
     console.print(f"[dim]CORS allow-origin:[/] {state.config.allow_origin}")
+    if state._postprocess_defaults.get("postprocess"):
+        console.print(
+            f"[dim]Default post-process model:[/] {state._postprocess_defaults.get('postprocess_model') or 'unset'}"
+        )
     console.print(
         "[dim]Routes:[/] GET /health, GET /ready, GET /metrics, GET /v1/models, "
-        "POST /v1/audio/transcriptions, POST /v1/audio/translations"
+        "POST /v1/audio/transcriptions, POST /v1/audio/translations, "
+        "POST /v1/text/postprocess, POST /v1/postprocess"
     )
 
     try:

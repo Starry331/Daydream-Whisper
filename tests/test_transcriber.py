@@ -159,7 +159,7 @@ class TranscriberTests(unittest.TestCase):
                     audio_path,
                     options=TranscribeOptions(
                         postprocess=True,
-                        postprocess_model="qwen-local",
+                        postprocess_model="local-mm-model",
                         postprocess_base_url="http://127.0.0.1:11435/v1",
                     ),
                 )

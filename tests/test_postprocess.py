@@ -11,7 +11,7 @@ class PostProcessTests(unittest.TestCase):
         processor = OpenAICompatPostProcessor(
             PostProcessOptions(
                 enabled=True,
-                model="qwen-local",
+                model="local-mm-model",
                 base_url="http://127.0.0.1:11435/v1",
             ),
             requester=lambda endpoint, headers, payload, timeout: {
@@ -25,7 +25,7 @@ class PostProcessTests(unittest.TestCase):
         self.assertEqual(result.raw_text, "helo world")
         self.assertEqual(result.text, "Hello, world.")
         self.assertTrue(result.postprocess["applied"])
-        self.assertEqual(result.postprocess["model"], "qwen-local")
+        self.assertEqual(result.postprocess["model"], "local-mm-model")
 
     def test_summary_mode_uses_custom_endpoint_shape(self) -> None:
         captured: dict[str, object] = {}
@@ -40,7 +40,7 @@ class PostProcessTests(unittest.TestCase):
         processor = OpenAICompatPostProcessor(
             PostProcessOptions(
                 enabled=True,
-                model="qwen-local",
+                model="local-mm-model",
                 base_url="http://127.0.0.1:11435",
                 mode="summary",
                 timeout=12.0,
@@ -55,7 +55,7 @@ class PostProcessTests(unittest.TestCase):
         self.assertEqual(captured["timeout"], 12.0)
         payload = captured["payload"]
         assert isinstance(payload, dict)
-        self.assertEqual(payload["model"], "qwen-local")
+        self.assertEqual(payload["model"], "local-mm-model")
         self.assertEqual(payload["messages"][0]["role"], "system")
         self.assertIn("summarize transcripts", payload["messages"][0]["content"])
 

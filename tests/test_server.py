@@ -7,7 +7,9 @@ from unittest import mock
 from dwhisper.server import (
     SpeechAPIConfig,
     SpeechAPIState,
+    build_postprocess_response,
     build_transcription_response,
+    parse_postprocess_api_request,
     parse_speech_api_request,
 )
 from dwhisper.transcriber import TranscribeResult
@@ -104,7 +106,7 @@ class ServerTests(unittest.TestCase):
                     "\"vocabulary\": {\"helo\": \"hello\"},"
                     "\"correction\": {\"capitalize_sentences\": true},"
                     "\"postprocess\": true,"
-                    "\"postprocess_model\": \"qwen-local\","
+                    "\"postprocess_model\": \"local-mm-model\","
                     "\"postprocess_base_url\": \"http://127.0.0.1:11435/v1\","
                     "\"beam_size\": 4"
                     "}"
@@ -118,7 +120,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(request.options.correction, {"capitalize_sentences": True})
         self.assertEqual(request.options.beam_size, 4)
         self.assertTrue(request.options.postprocess)
-        self.assertEqual(request.options.postprocess_model, "qwen-local")
+        self.assertEqual(request.options.postprocess_model, "local-mm-model")
         self.assertEqual(request.options.postprocess_base_url, "http://127.0.0.1:11435/v1")
         self.assertIn("profile", request.provided_options)
 
@@ -173,8 +175,71 @@ class ServerTests(unittest.TestCase):
         content_type, body = build_transcription_response(result, response_format="verbose_json")
         self.assertEqual(content_type, "application/json")
         self.assertIn('"language": "en"', body.decode("utf-8"))
+        content_type, body = build_postprocess_response(
+            {"text": "cleaned", "raw_text": "raw"},
+            response_format="text",
+        )
+        self.assertEqual(content_type, "text/plain; charset=utf-8")
+        self.assertEqual(body.decode("utf-8"), "cleaned")
         self.assertIn("uptime_seconds", state.ready_payload())
         self.assertIn(b"dwhisper_completed_requests", state.metrics_text())
+
+    def test_parse_postprocess_api_request_uses_defaults_and_overrides(self) -> None:
+        request = parse_postprocess_api_request(
+            content_type="application/json",
+            body=(
+                "{"
+                "\"text\": \"helo world\","
+                "\"mode\": \"summary\","
+                "\"model\": \"glm-4.1v\""
+                "}"
+            ).encode("utf-8"),
+            default_options={
+                "enabled": True,
+                "model": "local-mm-model",
+                "base_url": "http://127.0.0.1:11435/v1",
+                "api_key": "local-key",
+                "mode": "clean",
+                "timeout": 22.0,
+            },
+        )
+
+        self.assertEqual(request.text, "helo world")
+        self.assertEqual(request.response_format, "json")
+        self.assertTrue(request.options.enabled)
+        self.assertEqual(request.options.model, "glm-4.1v")
+        self.assertEqual(request.options.base_url, "http://127.0.0.1:11435/v1")
+        self.assertEqual(request.options.mode, "summary")
+
+    def test_state_postprocess_text_uses_configured_defaults(self) -> None:
+        state = SpeechAPIState(
+            SpeechAPIConfig(
+                host="127.0.0.1",
+                port=11434,
+                model="whisper:base",
+                postprocess_defaults={
+                    "postprocess": True,
+                    "postprocess_model": "local-mm-model",
+                    "postprocess_base_url": "http://127.0.0.1:11435/v1",
+                    "postprocess_mode": "clean",
+                },
+            ),
+            postprocessor_factory=lambda options: mock.Mock(
+                process_text=mock.Mock(return_value="Hello world.")
+            ),
+        )
+        request = parse_postprocess_api_request(
+            content_type="application/json",
+            body=b'{"text": "helo world"}',
+            default_options=state._postprocess_defaults,
+        )
+
+        payload = state.postprocess_text(request)
+
+        self.assertEqual(payload["text"], "Hello world.")
+        self.assertEqual(payload["raw_text"], "helo world")
+        self.assertTrue(payload["postprocess"]["enabled"])
+        self.assertEqual(payload["postprocess"]["model"], "local-mm-model")
 
     def test_state_warmup_and_close_delegate_to_cached_transcriber(self) -> None:
         FakeTranscriber.warmup_calls = 0
@@ -214,7 +279,7 @@ class ServerTests(unittest.TestCase):
         state._vocabulary_path = "/tmp/vocabulary.yaml"
         state._postprocess_defaults = {
             "postprocess": True,
-            "postprocess_model": "qwen-local",
+            "postprocess_model": "local-mm-model",
             "postprocess_base_url": "http://127.0.0.1:11435/v1",
             "postprocess_mode": "clean",
             "postprocess_timeout": 18.0,
@@ -239,7 +304,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(options.corrections_path, "/tmp/corrections.yaml")
         self.assertEqual(options.vocabulary_path, "/tmp/vocabulary.yaml")
         self.assertTrue(options.postprocess)
-        self.assertEqual(options.postprocess_model, "qwen-local")
+        self.assertEqual(options.postprocess_model, "local-mm-model")
         self.assertEqual(options.postprocess_base_url, "http://127.0.0.1:11435/v1")
         self.assertEqual(options.postprocess_timeout, 18.0)
 
