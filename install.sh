@@ -81,11 +81,28 @@ sync_repo() {
 }
 
 install_python_env() {
-    print "  Creating virtual environment..."
-    "$PYTHON_CMD" -m venv "$INSTALL_DIR/.venv"
+    print "  Creating isolated virtual environment..."
+    "$PYTHON_CMD" -m venv --clear "$INSTALL_DIR/.venv"
     "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip
     "$INSTALL_DIR/.venv/bin/pip" install -e "$INSTALL_DIR"
     print_step "Installed Python dependencies"
+}
+
+verify_install_layout() {
+    if [[ ! -x "$INSTALL_DIR/.venv/bin/dwhisper" ]]; then
+        print_fail "Missing dwhisper launcher in $INSTALL_DIR/.venv/bin"
+        exit 1
+    fi
+
+    if [[ -e "$INSTALL_DIR/.venv/bin/daydream" ]]; then
+        print_fail "Unexpected daydream launcher found in Daydream Whisper virtual environment."
+        print_fail "Aborting to avoid conflicting with the original Daydream CLI."
+        exit 1
+    fi
+
+    if [[ -e "$LAUNCHER_DIR/daydream" ]]; then
+        print_warn "Existing $LAUNCHER_DIR/daydream left untouched."
+    fi
 }
 
 install_launcher() {
@@ -125,6 +142,7 @@ main() {
     install_brew_package ffmpeg
     sync_repo
     install_python_env
+    verify_install_layout
     install_launcher
     pull_default_model
 
