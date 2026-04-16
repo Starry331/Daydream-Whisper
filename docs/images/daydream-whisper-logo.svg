@@ -1,0 +1,17 @@
+<svg width="960" height="320" viewBox="0 0 960 320" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="960" height="320" rx="32" fill="#0D1B2A"/>
+  <rect x="36" y="36" width="888" height="248" rx="24" fill="url(#bg)"/>
+  <circle cx="162" cy="160" r="78" fill="#13324B"/>
+  <circle cx="162" cy="160" r="58" fill="#1D4F73"/>
+  <path d="M108 160C120 160 126 116 138 116C150 116 156 204 168 204C180 204 186 92 198 92C210 92 216 228 228 228" stroke="#E7F8FF" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M108 160C120 160 126 138 138 138C150 138 156 182 168 182C180 182 186 116 198 116C210 116 216 204 228 204" stroke="#7FDBFF" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="292" y="136" fill="#EAF7FF" font-family="'Avenir Next', 'Helvetica Neue', Arial, sans-serif" font-size="54" font-weight="700">Daydream Whisper</text>
+  <text x="292" y="186" fill="#9BC3D9" font-family="'Avenir Next', 'Helvetica Neue', Arial, sans-serif" font-size="24">Apple Silicon speech recognition CLI powered by MLX Whisper</text>
+  <text x="292" y="224" fill="#7FDBFF" font-family="'Avenir Next', 'Helvetica Neue', Arial, sans-serif" font-size="20">Fast local transcription. Realtime listening. Configurable voice workflows.</text>
+  <defs>
+    <linearGradient id="bg" x1="36" y1="36" x2="924" y2="284" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#102437"/>
+      <stop offset="1" stop-color="#143652"/>
+    </linearGradient>
+  </defs>
+</svg>
