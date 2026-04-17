@@ -20,6 +20,7 @@ CONFIG_FILE = DAYDREAM_HOME / "config.yaml"
 CORRECTIONS_FILE = DAYDREAM_HOME / "corrections.yaml"
 VOCABULARY_FILE = DAYDREAM_HOME / "vocabulary.yaml"
 PROFILES_FILE = DAYDREAM_HOME / "profiles.yaml"
+PROFILES_DIR = DAYDREAM_HOME / "profiles"
 
 HF_HOME = Path(_env_lookup("HF_HOME") or "~/.cache/huggingface").expanduser()
 MODEL_CACHE_DIR = Path(
@@ -41,6 +42,8 @@ DEFAULT_POSTPROCESS_BASE_URL: str | None = None
 DEFAULT_POSTPROCESS_API_KEY = "dwhisper-local"
 DEFAULT_POSTPROCESS_MODE = "clean"
 DEFAULT_POSTPROCESS_TIMEOUT = 30.0
+DEFAULT_POSTPROCESS_BACKEND = "auto"
+DEFAULT_POSTPROCESS_MAX_TOKENS: int | None = None
 DEFAULT_AUDIO_DEVICE: str | None = None
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_CHUNK_DURATION = 3.0
@@ -49,7 +52,9 @@ DEFAULT_SILENCE_THRESHOLD = 1.0
 DEFAULT_VAD_SENSITIVITY = 0.6
 DEFAULT_PUSH_TO_TALK = False
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 11434
+# Use 11500 by default so dwhisper can live alongside the Daydream CLI on 11434
+# without colliding. Override via DWHISPER_PORT / config file when needed.
+DEFAULT_PORT = 11500
 DEFAULT_SERVE_MAX_CONCURRENCY = 2
 DEFAULT_SERVE_REQUEST_TIMEOUT = 120.0
 DEFAULT_SERVE_MAX_REQUEST_BYTES = 50 * 1024 * 1024
@@ -60,6 +65,7 @@ DEFAULT_SERVE_ALLOW_ORIGIN = "*"
 def ensure_home() -> None:
     DAYDREAM_HOME.mkdir(parents=True, exist_ok=True)
     LOCAL_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    PROFILES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _load_config() -> dict[str, Any]:
@@ -263,6 +269,45 @@ def get_default_postprocess_timeout() -> float:
     return max(1.0, _coerce_float(value, DEFAULT_POSTPROCESS_TIMEOUT))
 
 
+def get_default_postprocess_backend() -> str:
+    value = _coerce_str(
+        _config_value(
+            DEFAULT_POSTPROCESS_BACKEND,
+            "postprocess",
+            "backend",
+            env_names=("DWHISPER_POSTPROCESS_BACKEND", "DAYDREAM_POSTPROCESS_BACKEND"),
+        ),
+        DEFAULT_POSTPROCESS_BACKEND,
+    ) or DEFAULT_POSTPROCESS_BACKEND
+    normalized = value.strip().lower()
+    return normalized if normalized in {"auto", "http", "mlx"} else DEFAULT_POSTPROCESS_BACKEND
+
+
+def get_configured_postprocess_max_tokens() -> int | None:
+    value = _config_value(
+        None,
+        "postprocess",
+        "max_tokens",
+        env_names=("DWHISPER_POSTPROCESS_MAX_TOKENS", "DAYDREAM_POSTPROCESS_MAX_TOKENS"),
+    )
+    if value is None:
+        return None
+    try:
+        resolved = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return max(32, resolved)
+
+
+def get_default_postprocess_max_tokens(*, mode: str | None = None) -> int:
+    configured = get_configured_postprocess_max_tokens()
+    if configured is not None:
+        return configured
+    from dwhisper.postprocess import default_max_tokens_for_mode
+
+    return default_max_tokens_for_mode(mode or get_default_postprocess_mode())
+
+
 def get_default_audio_device() -> str | None:
     value = _config_value(
         DEFAULT_AUDIO_DEVICE,
@@ -431,6 +476,22 @@ def get_default_profiles_path() -> Path:
         env_names=("DWHISPER_PROFILES_FILE", "DAYDREAM_PROFILES_FILE"),
     )
     return Path(str(value or PROFILES_FILE)).expanduser()
+
+
+def get_configured_profiles_path() -> Path | None:
+    raw_value = _env_lookup("DWHISPER_PROFILES_FILE", "DAYDREAM_PROFILES_FILE")
+    if raw_value is None:
+        raw_value = _get_nested(_load_config(), "profiles", "file")
+    if raw_value is None:
+        return None
+    text = str(raw_value).strip()
+    if not text:
+        return None
+    return Path(text).expanduser()
+
+
+def get_default_profiles_dir() -> Path:
+    return PROFILES_DIR
 
 
 def get_local_model_roots() -> list[Path]:

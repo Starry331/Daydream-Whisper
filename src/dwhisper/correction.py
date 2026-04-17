@@ -46,6 +46,12 @@ _DOUBLE_SPACE_RE = re.compile(r"[ \t]+")
 _LEADING_PUNCT_RE = re.compile(r"^[\s,.;:!?，。、；：！？]+")
 _TRAILING_TERMINAL_RE = re.compile(r"[.!?。！？]\s*$")
 _SENTENCE_SPLIT_RE = re.compile(r"([.!?。！？]+\s+)")
+# Run-of-the-same-terminal compressed into one (`...` → `.`, `。。` → `。`).
+_REPEATED_TERMINAL_RE = re.compile(r"([.!?。！？])\1+")
+# ASCII punctuation directly followed by a letter/digit with no space.
+_LATIN_PUNCT_NO_SPACE_RE = re.compile(r"([,.!?;:])(?=[A-Za-z0-9])")
+# Range of CJK characters we care about for script detection.
+_CJK_CHAR_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
 
 
 @dataclass(slots=True)
@@ -84,6 +90,10 @@ class CorrectionConfig:
     capitalize_sentences: bool = False
     ensure_terminal_punctuation: bool = False
     terminal_punctuation: str = "."
+    # Light, script-aware punctuation polish that runs after normalize_whitespace:
+    # collapse `。。` / `...`, add a missing space after Latin punctuation, and
+    # prefer `。` for CJK-heavy lines when ensure_terminal_punctuation is on.
+    auto_punctuation: bool = True
 
     # Profanity filter -------------------------------------------------------------
     profanity_filter: bool = False
@@ -106,6 +116,7 @@ class CorrectionConfig:
                 self.normalize_whitespace,
                 self.capitalize_sentences,
                 self.ensure_terminal_punctuation,
+                self.auto_punctuation,
                 self.profanity_filter,
             )
         )
@@ -132,6 +143,7 @@ class CorrectionConfig:
             "capitalize_sentences": self.capitalize_sentences,
             "ensure_terminal_punctuation": self.ensure_terminal_punctuation,
             "terminal_punctuation": self.terminal_punctuation,
+            "auto_punctuation": self.auto_punctuation,
             "profanity_filter": self.profanity_filter,
             "profanity_words": list(self.profanity_words),
             "profanity_mask": self.profanity_mask,
@@ -217,6 +229,7 @@ class CorrectionConfig:
                 payload.get("ensure_terminal_punctuation", False)
             ),
             terminal_punctuation=str(payload.get("terminal_punctuation", ".")),
+            auto_punctuation=bool(payload.get("auto_punctuation", True)),
             profanity_filter=bool(payload.get("profanity_filter", False)),
             profanity_words=_coerce_str_list(payload.get("profanity_words")),
             profanity_mask=str(payload.get("profanity_mask", "***")),
@@ -286,6 +299,37 @@ def _collapse_phrase_repeats(text: str, max_repeats: int) -> str:
         previous = current
         current = pattern.sub(lambda match: match.group(1), current)
     return current
+
+
+def _is_cjk_dominant(text: str) -> bool:
+    """Return True when more than half of the visible characters are CJK."""
+    letters = [ch for ch in text if not ch.isspace() and not ch.isdigit()]
+    if not letters:
+        return False
+    cjk = sum(1 for ch in letters if _CJK_CHAR_RE.match(ch))
+    return cjk * 2 >= len(letters)
+
+
+def _auto_punctuation(text: str, *, cjk_dominant: bool | None = None) -> str:
+    """Light, script-aware punctuation polish.
+
+    Safe to run on already-normalized text. Performs three cheap passes:
+    1. Collapse runs of identical terminals (``...`` → ``.``, ``。。`` → ``。``).
+    2. Insert a space after Latin ``,.!?;:`` when followed by a letter/digit.
+    3. Remove stray whitespace introduced between CJK characters and their
+       immediately-following CJK punctuation.
+    """
+
+    if not text:
+        return text
+    polished = _REPEATED_TERMINAL_RE.sub(r"\1", text)
+    if cjk_dominant is None:
+        cjk_dominant = _is_cjk_dominant(polished)
+    if not cjk_dominant:
+        polished = _LATIN_PUNCT_NO_SPACE_RE.sub(r"\1 ", polished)
+    # Strip a trailing space that the insertion above may have left behind.
+    polished = re.sub(r" +([\n\r])", r"\1", polished)
+    return polished
 
 
 def _capitalize_sentences(text: str) -> str:
@@ -368,6 +412,10 @@ class TranscriptCorrector:
             cleaned = _PUNCT_SPACE_RE.sub(r"\1", cleaned)
             cleaned = _LEADING_PUNCT_RE.sub("", cleaned).strip()
 
+        cjk_dominant = _is_cjk_dominant(cleaned) if cleaned else False
+        if self.config.auto_punctuation and cleaned:
+            cleaned = _auto_punctuation(cleaned, cjk_dominant=cjk_dominant)
+
         if self.config.capitalize_sentences:
             cleaned = _capitalize_sentences(cleaned)
 
@@ -376,7 +424,11 @@ class TranscriptCorrector:
             and cleaned
             and not _TRAILING_TERMINAL_RE.search(cleaned)
         ):
-            cleaned = cleaned.rstrip() + (self.config.terminal_punctuation or ".")
+            if self.config.auto_punctuation and cjk_dominant:
+                terminal = "。"
+            else:
+                terminal = self.config.terminal_punctuation or "."
+            cleaned = cleaned.rstrip() + terminal
 
         return cleaned
 

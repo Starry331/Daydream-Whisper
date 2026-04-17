@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import threading
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -99,6 +101,50 @@ class RealtimeTests(unittest.TestCase):
     def test_realtime_config_rejects_invalid_overlap(self) -> None:
         with self.assertRaisesRegex(ValueError, "smaller than chunk_duration"):
             RealtimeConfig(chunk_duration=1.0, overlap_duration=1.0)
+
+    def test_realtime_session_overlaps_postprocess_with_next_chunk(self) -> None:
+        events = []
+        transcriber = FakeTranscriber()
+        gate = threading.Event()
+        started = threading.Event()
+
+        def fake_apply(_processor, result):
+            started.set()
+            gate.wait(timeout=1.0)
+            result.text = f"{result.text}-clean"
+            result.postprocess = {"applied": True}
+
+        with mock.patch.object(
+            TranscribeOptions,
+            "build_postprocessor",
+            return_value=object(),
+        ), mock.patch("dwhisper.realtime._safe_apply_postprocessor", side_effect=fake_apply):
+            session = RealtimeSession(
+                transcriber=transcriber,
+                options=TranscribeOptions(
+                    postprocess=True,
+                    postprocess_model="local-mm-model",
+                    postprocess_base_url="http://127.0.0.1:11435/v1",
+                ),
+                config=RealtimeConfig(
+                    sample_rate=4,
+                    chunk_duration=1.0,
+                    overlap_duration=0.0,
+                    silence_threshold=0.5,
+                ),
+                event_handler=events.append,
+                capture=FakeCapture(),
+            )
+            session.start()
+            session.feed_audio(np.ones(4, dtype=np.float32))
+            self.assertTrue(started.wait(timeout=1.0))
+            session.feed_audio(np.ones(4, dtype=np.float32))
+            self.assertEqual(transcriber.calls, 2)
+            gate.set()
+            session.stop()
+
+        finals = [event for event in events if event.kind == "final"]
+        self.assertEqual([event.text for event in finals], ["segment-1-clean", "segment-2-clean"])
 
 
 if __name__ == "__main__":

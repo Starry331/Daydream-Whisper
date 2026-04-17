@@ -9,6 +9,7 @@ from unittest import mock
 from click.testing import CliRunner
 
 from dwhisper.cli import cli
+from dwhisper.doctor import DoctorCheck
 
 
 class CliTests(unittest.TestCase):
@@ -330,6 +331,7 @@ class CliTests(unittest.TestCase):
                 "postprocess_mode": "clean",
                 "postprocess_prompt": None,
                 "postprocess_timeout": 30.0,
+                "postprocess_backend": "auto",
             },
         )
 
@@ -355,6 +357,53 @@ class CliTests(unittest.TestCase):
             start_server.call_args.kwargs["postprocess_defaults"]["postprocess_base_url"],
             "http://127.0.0.1:11435/v1",
         )
+
+    def test_doctor_command_renders_checks_and_summary(self) -> None:
+        runner = CliRunner()
+        fake_results = [
+            DoctorCheck(name="Python version", status="ok", message="Python 3.14.3"),
+            DoctorCheck(
+                name="sounddevice / PortAudio",
+                status="warn",
+                message="not installed",
+                hint="Install PortAudio.",
+            ),
+            DoctorCheck(
+                name="Post-process defaults",
+                status="info",
+                message="disabled",
+            ),
+        ]
+
+        with mock.patch("dwhisper.config.ensure_home"), mock.patch(
+            "dwhisper.doctor.run_doctor",
+            return_value=fake_results,
+        ):
+            invoke = runner.invoke(cli, ["doctor"])
+
+        self.assertEqual(invoke.exit_code, 0, invoke.output)
+        self.assertIn("Python version", invoke.output)
+        self.assertIn("sounddevice / PortAudio", invoke.output)
+        self.assertIn("Install PortAudio.", invoke.output)
+        self.assertIn("Summary: 1 ok", invoke.output)
+        self.assertIn("1 warn", invoke.output)
+        self.assertIn("1 info", invoke.output)
+
+    def test_doctor_strict_exits_non_zero_on_warning(self) -> None:
+        runner = CliRunner()
+        fake_results = [
+            DoctorCheck(name="Cached Whisper models", status="warn", message="none found"),
+        ]
+
+        with mock.patch("dwhisper.config.ensure_home"), mock.patch(
+            "dwhisper.doctor.run_doctor",
+            return_value=fake_results,
+        ):
+            invoke = runner.invoke(cli, ["doctor", "--strict"])
+
+        self.assertEqual(invoke.exit_code, 1, invoke.output)
+        self.assertIn("Cached Whisper models", invoke.output)
+        self.assertIn("none found", invoke.output)
 
 
 if __name__ == "__main__":

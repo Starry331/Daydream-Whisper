@@ -21,7 +21,12 @@ import numpy as np
 from dwhisper.audio import load_audio_file, write_wav_file
 from dwhisper.correction import CorrectionConfig, TranscriptCorrector, load_correction_config
 from dwhisper.models import ensure_runtime_model, validate_runtime_model
-from dwhisper.postprocess import OpenAICompatPostProcessor, PostProcessOptions
+from dwhisper.postprocess import (
+    MLXLMPostProcessor,
+    OpenAICompatPostProcessor,
+    PostProcessOptions,
+    build_postprocessor,
+)
 from dwhisper.utils import format_srt, format_vtt
 
 
@@ -84,6 +89,8 @@ class TranscribeOptions:
     postprocess_mode: str = "clean"
     postprocess_prompt: str | None = None
     postprocess_timeout: float = 30.0
+    postprocess_backend: str = "auto"
+    postprocess_max_tokens: int | None = None
 
     def __post_init__(self) -> None:
         self.task = str(self.task).strip().lower() or "transcribe"
@@ -151,6 +158,8 @@ class TranscribeOptions:
             "postprocess_mode": self.postprocess_mode,
             "postprocess_prompt": self.postprocess_prompt,
             "postprocess_timeout": self.postprocess_timeout,
+            "postprocess_backend": self.postprocess_backend,
+            "postprocess_max_tokens": self.postprocess_max_tokens,
         }
 
     def extra_mlx_kwargs(self) -> dict[str, Any]:
@@ -221,10 +230,10 @@ class TranscribeOptions:
             return None
         return TranscriptCorrector(config=config)
 
-    def build_postprocessor(self) -> OpenAICompatPostProcessor | None:
+    def build_postprocessor(self) -> OpenAICompatPostProcessor | MLXLMPostProcessor | None:
         if not self.postprocess:
             return None
-        return OpenAICompatPostProcessor(
+        return build_postprocessor(
             PostProcessOptions(
                 enabled=self.postprocess,
                 model=self.postprocess_model,
@@ -233,6 +242,8 @@ class TranscribeOptions:
                 mode=self.postprocess_mode,
                 prompt=self.postprocess_prompt,
                 timeout=self.postprocess_timeout,
+                backend=self.postprocess_backend,
+                max_tokens=self.postprocess_max_tokens,
             )
         )
 
@@ -651,7 +662,7 @@ class WhisperTranscriber:
         if corrector is not None:
             corrector.apply(result)
         if postprocessor is not None:
-            postprocessor.apply(result)
+            _safe_apply_postprocessor(postprocessor, result)
         return result
 
     def transcribe_samples(
@@ -674,7 +685,7 @@ class WhisperTranscriber:
             if corrector is not None:
                 corrector.apply(result)
             if postprocessor is not None:
-                postprocessor.apply(result)
+                _safe_apply_postprocessor(postprocessor, result)
             return result
         finally:
             temp_path.unlink(missing_ok=True)
@@ -687,6 +698,35 @@ def transcribe_file(
     options: TranscribeOptions | None = None,
 ) -> TranscribeResult:
     return WhisperTranscriber(model).transcribe_file(audio_path, options=options)
+
+
+def _safe_apply_postprocessor(postprocessor: Any, result: TranscribeResult) -> None:
+    """Apply a post-processor while tolerating backend failures.
+
+    A broken local model or unreachable endpoint should not fail the whole
+    transcription — we keep the raw transcript and record the error in the
+    ``postprocess`` metadata so callers can see what happened.
+    """
+    try:
+        postprocessor.apply(result)
+        return
+    except Exception as exc:  # pragma: no cover - exercised via targeted test
+        options = getattr(postprocessor, "options", None)
+        existing = dict(result.postprocess or {})
+        existing.update(
+            {
+                "enabled": bool(getattr(options, "enabled", False)),
+                "applied": False,
+                "mode": getattr(options, "mode", None),
+                "model": getattr(options, "model", None),
+                "backend": options.resolved_backend() if options is not None else None,
+                "error": str(exc),
+            }
+        )
+        base_url = getattr(options, "base_url", None)
+        if base_url is not None:
+            existing["base_url"] = base_url
+        result.postprocess = existing
 
 
 def _run_worker(request_path: Path, response_path: Path) -> int:

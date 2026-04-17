@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import dataclasses
 import queue
 import select
 import sys
 import termios
+import threading
 import tty
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -13,7 +15,12 @@ import numpy as np
 from rich.console import Console
 
 from dwhisper.audio import AudioCapture, AudioConfig, VoiceActivityDetector
-from dwhisper.transcriber import TranscribeOptions, TranscribeResult, WhisperTranscriber
+from dwhisper.transcriber import (
+    TranscribeOptions,
+    TranscribeResult,
+    WhisperTranscriber,
+    _safe_apply_postprocessor,
+)
 from dwhisper.utils import TranscriptionDisplay, render_listening_status
 
 
@@ -59,6 +66,13 @@ class TranscriptionEvent:
 
 
 @dataclass(slots=True)
+class _QueuedRealtimeResult:
+    result: TranscribeResult
+    start: float
+    end: float
+
+
+@dataclass(slots=True)
 class RealtimeSession:
     transcriber: WhisperTranscriber
     options: TranscribeOptions
@@ -75,6 +89,11 @@ class RealtimeSession:
     _stream_cursor: float = field(default=0.0, init=False)
     _silence_duration: float = field(default=0.0, init=False)
     _had_speech: bool = field(default=False, init=False)
+    _transcribe_options: TranscribeOptions = field(init=False, repr=False)
+    _postprocessor: Any | None = field(default=None, init=False, repr=False)
+    _postprocess_queue: queue.Queue[_QueuedRealtimeResult | None] | None = field(default=None, init=False, repr=False)
+    _postprocess_thread: threading.Thread | None = field(default=None, init=False, repr=False)
+    _postprocess_queue_size: int = field(default=4, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.vad = VoiceActivityDetector(self.config.vad_sensitivity)
@@ -88,15 +107,80 @@ class RealtimeSession:
                     device=self.config.device,
                 )
             )
+        self._transcribe_options = self.options
+        if self.options.postprocess:
+            self._transcribe_options = dataclasses.replace(self.options, postprocess=False)
+            self._postprocessor = self.options.build_postprocessor()
+            self._postprocess_queue = queue.Queue(maxsize=self._postprocess_queue_size)
+            self._postprocess_thread = threading.Thread(
+                target=self._run_postprocess_loop,
+                name="dwhisper-realtime-postprocess",
+                daemon=True,
+            )
 
     def _emit(self, event: TranscriptionEvent) -> None:
         if self.event_handler is not None:
             self.event_handler(event)
 
+    def _run_postprocess_loop(self) -> None:
+        if self._postprocess_queue is None:
+            return
+
+        while True:
+            item = self._postprocess_queue.get()
+            try:
+                if item is None:
+                    return
+                if self._postprocessor is not None:
+                    _safe_apply_postprocessor(self._postprocessor, item.result)
+                self._emit(
+                    TranscriptionEvent(
+                        kind="final",
+                        text=item.result.text,
+                        start=item.start,
+                        end=item.end,
+                        result=item.result,
+                    )
+                )
+            finally:
+                self._postprocess_queue.task_done()
+
+    def _submit_result(self, result: TranscribeResult, *, start: float, end: float) -> None:
+        if self._postprocess_queue is None:
+            self._emit(
+                TranscriptionEvent(
+                    kind="final",
+                    text=result.text,
+                    start=start,
+                    end=end,
+                    result=result,
+                )
+            )
+            return
+
+        queued = _QueuedRealtimeResult(result=result, start=start, end=end)
+        while True:
+            try:
+                self._postprocess_queue.put(
+                    queued,
+                    timeout=max(self.config.poll_interval, 0.1),
+                )
+                return
+            except queue.Full:
+                continue
+
+    def _drain_postprocess_loop(self) -> None:
+        if self._postprocess_queue is None or self._postprocess_thread is None:
+            return
+        self._postprocess_queue.put(None)
+        self._postprocess_thread.join()
+
     def start(self) -> None:
         if self.running:
             return
         self.capture.start()
+        if self._postprocess_thread is not None and not self._postprocess_thread.is_alive():
+            self._postprocess_thread.start()
         self.running = True
         self.paused = False
         self._push_to_talk_active = not self.config.push_to_talk
@@ -114,6 +198,7 @@ class RealtimeSession:
             self._flush_buffer(retain_overlap=False)
         self.capture.stop()
         self.running = False
+        self._drain_postprocess_loop()
         self._emit(TranscriptionEvent(kind="status", message="Listening stopped."))
 
     def pause(self) -> None:
@@ -190,7 +275,7 @@ class RealtimeSession:
             result = self.transcriber.transcribe_samples(
                 audio,
                 sample_rate=self.config.sample_rate,
-                options=self.options,
+                options=self._transcribe_options,
             )
         except Exception as exc:
             self._buffer_chunks = []
@@ -200,15 +285,7 @@ class RealtimeSession:
             self._emit(TranscriptionEvent(kind="error", message=str(exc)))
             return
 
-        self._emit(
-            TranscriptionEvent(
-                kind="final",
-                text=result.text,
-                start=start,
-                end=end,
-                result=result,
-            )
-        )
+        self._submit_result(result, start=start, end=end)
 
         overlap_samples = int(round(self.config.overlap_duration * self.config.sample_rate))
         if retain_overlap and overlap_samples > 0 and audio.size > overlap_samples:

@@ -78,6 +78,7 @@ class ConfigTests(unittest.TestCase):
                 self.assertEqual(config.get_default_postprocess_api_key(), "test-key")
                 self.assertEqual(config.get_default_postprocess_mode(), "summary")
                 self.assertEqual(config.get_default_postprocess_timeout(), 21.0)
+                self.assertEqual(config.get_default_postprocess_max_tokens(), 768)
                 self.assertEqual(str(config.get_default_corrections_path()), "/tmp/corrections.yaml")
                 self.assertEqual(str(config.get_default_vocabulary_path()), "/tmp/vocabulary.yaml")
                 self.assertEqual(str(config.get_default_profiles_path()), "/tmp/profiles.yaml")
@@ -123,6 +124,22 @@ class ConfigTests(unittest.TestCase):
                 self.assertTrue(config.get_default_push_to_talk())
                 self.assertTrue(config.get_default_postprocess_enabled())
                 self.assertEqual(config.get_default_postprocess_model(), "local-mm-model")
+
+    def test_postprocess_max_tokens_defaults_follow_mode_when_unconfigured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "daydream-home"
+            home.mkdir(parents=True, exist_ok=True)
+            (home / "config.yaml").write_text(
+                "postprocess:\n"
+                "  mode: meeting-notes\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.dict(os.environ, {"DAYDREAM_HOME": str(home)}, clear=False):
+                config = reload_module("dwhisper.config")
+                self.assertIsNone(config.get_configured_postprocess_max_tokens())
+                self.assertEqual(config.get_default_postprocess_max_tokens(), 2048)
+                self.assertEqual(config.get_default_postprocess_max_tokens(mode="clean"), 256)
 
     def test_ensure_home_creates_home_and_local_models_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

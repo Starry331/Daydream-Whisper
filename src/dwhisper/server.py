@@ -7,13 +7,14 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+import dataclasses
 from dataclasses import dataclass, field
 from email.parser import BytesParser
 from email.policy import default as email_default_policy
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from urllib.parse import parse_qs, urlparse
 
 from rich.console import Console
@@ -21,23 +22,40 @@ from rich.console import Console
 from dwhisper.config import (
     get_default_corrections_path,
     get_default_postprocess_api_key,
+    get_default_postprocess_backend,
     get_default_postprocess_base_url,
+    get_configured_postprocess_max_tokens,
     get_default_postprocess_enabled,
     get_default_postprocess_mode,
     get_default_postprocess_model,
     get_default_postprocess_timeout,
-    get_default_profiles_path,
     get_default_serve_allow_origin,
     get_default_vocabulary_path,
 )
 from dwhisper.models import ensure_runtime_model, validate_runtime_model
-from dwhisper.postprocess import OpenAICompatPostProcessor, PostProcessOptions
+from dwhisper.postprocess import (
+    POSTPROCESS_MODES,
+    MLXLMPostProcessor,
+    OpenAICompatPostProcessor,
+    PostProcessOptions,
+    build_postprocessor,
+)
 from dwhisper.profiles import ProfileStore, load_profile_store
 from dwhisper.registry import list_available
 from dwhisper.transcriber import TranscribeOptions, TranscribeResult, WhisperTranscriber
 
 
 console = Console()
+
+
+POSTPROCESS_ROUTE_MODES: dict[str, str | None] = {
+    "/v1/text/postprocess": None,
+    "/v1/postprocess": None,
+    "/v1/text/clean": "clean",
+    "/v1/text/summary": "summary",
+    "/v1/text/meeting-notes": "meeting-notes",
+    "/v1/text/speakers": "speaker-format",
+}
 
 
 class SpeechAPIError(Exception):
@@ -73,6 +91,7 @@ class TextPostProcessRequest:
     language: str | None = None
     response_format: str = "json"
     options: PostProcessOptions = field(default_factory=PostProcessOptions)
+    stream: bool = False
 
 
 @dataclass(slots=True)
@@ -93,7 +112,7 @@ class SpeechAPIConfig:
 class SpeechAPIState:
     config: SpeechAPIConfig
     transcriber_factory: Callable[..., WhisperTranscriber] = WhisperTranscriber
-    postprocessor_factory: Callable[[PostProcessOptions], OpenAICompatPostProcessor] = OpenAICompatPostProcessor
+    postprocessor_factory: Callable[[PostProcessOptions], Any] = build_postprocessor
     model_lister: Callable[[], list[tuple[str, str, str]]] = list_available
     _transcribers: dict[str, WhisperTranscriber] = field(default_factory=dict, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
@@ -110,7 +129,7 @@ class SpeechAPIState:
 
     def __post_init__(self) -> None:
         self._semaphore = threading.BoundedSemaphore(max(1, self.config.max_concurrency))
-        self._profile_store = load_profile_store(get_default_profiles_path())
+        self._profile_store = load_profile_store()
         corrections_path = get_default_corrections_path()
         vocabulary_path = get_default_vocabulary_path()
         self._corrections_path = str(corrections_path) if corrections_path.exists() else None
@@ -119,7 +138,11 @@ class SpeechAPIState:
             "postprocess_api_key": get_default_postprocess_api_key(),
             "postprocess_mode": get_default_postprocess_mode(),
             "postprocess_timeout": get_default_postprocess_timeout(),
+            "postprocess_backend": get_default_postprocess_backend(),
         }
+        configured_postprocess_max_tokens = get_configured_postprocess_max_tokens()
+        if configured_postprocess_max_tokens is not None:
+            postprocess_defaults["postprocess_max_tokens"] = configured_postprocess_max_tokens
         if get_default_postprocess_enabled():
             postprocess_defaults["postprocess"] = True
         postprocess_model = get_default_postprocess_model()
@@ -162,6 +185,42 @@ class SpeechAPIState:
             )
         return {"object": "list", "data": entries}
 
+    def postprocess_status(self) -> dict[str, Any]:
+        """Describe what the server will do with a no-options transcript request.
+
+        Third-party clients (e.g. dictation apps) can GET /health or /ready and
+        use this block to decide whether they still need to run their own
+        correction pass. Returned shape intentionally mirrors the POST payload
+        metadata so clients can key off the same fields.
+        """
+        defaults = self._postprocess_defaults
+        enabled = bool(defaults.get("postprocess"))
+        model = defaults.get("postprocess_model")
+        backend = str(defaults.get("postprocess_backend") or "auto")
+        base_url = defaults.get("postprocess_base_url")
+        if backend == "auto":
+            resolved_backend = "http" if base_url else "mlx"
+        else:
+            resolved_backend = backend
+        configured = bool(enabled and model and (resolved_backend == "mlx" or base_url))
+        routes = [
+            "/v1/text/postprocess",
+            "/v1/postprocess",
+            "/v1/text/clean",
+            "/v1/text/summary",
+            "/v1/text/meeting-notes",
+            "/v1/text/speakers",
+        ]
+        return {
+            "enabled": enabled,
+            "configured": configured,
+            "model": model,
+            "backend": resolved_backend,
+            "mode": defaults.get("postprocess_mode"),
+            "base_url": base_url,
+            "routes": routes,
+        }
+
     def status_payload(self) -> dict[str, Any]:
         with self._lock:
             loaded_models = sorted(self._transcribers)
@@ -182,6 +241,7 @@ class SpeechAPIState:
             "max_concurrency": self.config.max_concurrency,
             "preload": self.config.preload,
             "uptime_seconds": max(0.0, time.time() - self._started_at),
+            "postprocess": self.postprocess_status(),
         }
 
     def ready_payload(self) -> dict[str, Any]:
@@ -300,6 +360,41 @@ class SpeechAPIState:
         transcriber = self._get_transcriber(model or self.config.model)
         transcriber.warmup()
 
+    def warmup_postprocess(self) -> dict[str, Any]:
+        """Eagerly load the default post-process backend.
+
+        Called by ``start_server --preload`` so a 闪电说-style client does not
+        pay the first-request model-load latency. Safe to call when post-process
+        isn't configured (returns ``{"warmed": False}``).
+        """
+        status = self.postprocess_status()
+        if not status["configured"]:
+            return {"warmed": False, **status}
+        try:
+            options = PostProcessOptions(
+                enabled=True,
+                model=status["model"],
+                base_url=status.get("base_url"),
+                api_key=self._postprocess_defaults.get("postprocess_api_key"),
+                mode=status["mode"] or "clean",
+                prompt=self._postprocess_defaults.get("postprocess_prompt"),
+                timeout=float(self._postprocess_defaults.get("postprocess_timeout") or 30.0),
+                backend=self._postprocess_defaults.get("postprocess_backend") or "auto",
+                max_tokens=self._postprocess_defaults.get("postprocess_max_tokens"),
+            )
+        except ValueError:
+            return {"warmed": False, **status}
+        processor = self.postprocessor_factory(options)
+        if options.resolved_backend() == "mlx" and hasattr(processor, "_ensure_loaded"):
+            try:
+                processor._ensure_loaded()
+                return {"warmed": True, **status}
+            except Exception as exc:
+                return {"warmed": False, "error": str(exc), **status}
+        # For http backends we cannot warm anything meaningful without making a
+        # real request; just report that the route is ready.
+        return {"warmed": True, **status}
+
     def close(self) -> None:
         with self._lock:
             transcribers = list(self._transcribers.values())
@@ -361,6 +456,8 @@ class SpeechAPIState:
                 "mode": request.options.mode,
                 "prompt": request.options.prompt,
                 "timeout": request.options.timeout,
+                "backend": request.options.backend,
+                "max_tokens": request.options.max_tokens,
             }
         )
         resolved = PostProcessOptions(**defaults)
@@ -368,27 +465,148 @@ class SpeechAPIState:
             raise SpeechAPIError(
                 HTTPStatus.BAD_REQUEST,
                 "Post-process route requires a configured local text model. "
-                "Set serve defaults or provide postprocess_model and postprocess_base_url.",
+                "Set serve defaults or provide postprocess_model and either "
+                "postprocess_base_url (http backend) or postprocess_backend=mlx.",
             )
         return resolved
 
     def postprocess_text(self, request: TextPostProcessRequest) -> dict[str, Any]:
         options = self._resolve_postprocess_options(request)
         processor = self.postprocessor_factory(options)
-        with self.acquire_slot():
-            processed = processor.process_text(transcript=request.text, language=request.language)
+        error: str | None = None
+        processed: str = request.text
+        try:
+            with self.acquire_slot():
+                processed = processor.process_text(transcript=request.text, language=request.language)
+        except SpeechAPIError:
+            raise
+        except Exception as exc:
+            error = str(exc)
+            processed = request.text
+
+        applied = error is None and processed.strip() != request.text.strip()
+        metadata: dict[str, Any] = {
+            "enabled": options.enabled,
+            "applied": applied,
+            "mode": options.mode,
+            "model": options.model,
+            "backend": options.resolved_backend(),
+        }
+        if options.base_url is not None:
+            metadata["base_url"] = options.base_url
+        if error is not None:
+            metadata["error"] = error
         return {
             "text": processed,
             "raw_text": request.text,
             "language": request.language,
-            "postprocess": {
+            "postprocess": metadata,
+        }
+
+    def stream_postprocess(
+        self, request: TextPostProcessRequest
+    ) -> Iterator[dict[str, Any]]:
+        """Yield SSE-shaped event dicts for the /v1/text/* routes.
+
+        Events are consumed by the HTTP layer and serialized as
+        ``data: <json>\\n\\n`` frames terminated by ``data: [DONE]\\n\\n``. The
+        last event before [DONE] always has ``done=True`` and carries the
+        aggregate ``text`` plus postprocess metadata so non-streaming clients
+        can reconstruct a complete response from the final frame alone.
+        """
+
+        options = self._resolve_postprocess_options(request)
+        processor = self.postprocessor_factory(options)
+        raw_text = request.text
+        model_name = options.model
+
+        def _make_final(processed: str, *, error: str | None) -> dict[str, Any]:
+            applied = error is None and processed.strip() != raw_text.strip()
+            metadata: dict[str, Any] = {
                 "enabled": options.enabled,
-                "applied": processed.strip() != request.text.strip(),
+                "applied": applied,
                 "mode": options.mode,
                 "model": options.model,
-                "base_url": options.base_url,
+                "backend": options.resolved_backend(),
+            }
+            if options.base_url is not None:
+                metadata["base_url"] = options.base_url
+            if error is not None:
+                metadata["error"] = error
+            return {
+                "done": True,
+                "text": processed,
+                "response": processed,
+                "message": {"role": "assistant", "content": processed},
+                "model": model_name,
+                "raw_text": raw_text,
+                "language": request.language,
+                "postprocess": metadata,
+            }
+
+        # Emit an opening frame so clients can advance UI state (e.g. show a
+        # typing cursor) before any model tokens arrive.
+        yield {
+            "done": False,
+            "delta": "",
+            "response": "",
+            "message": {"role": "assistant", "content": ""},
+            "model": model_name,
+            "raw_text": raw_text,
+            "language": request.language,
+            "postprocess": {
+                "enabled": options.enabled,
+                "mode": options.mode,
+                "model": options.model,
+                "backend": options.resolved_backend(),
             },
         }
+
+        stream_fn = getattr(processor, "stream_text", None)
+        if stream_fn is None:
+            # Legacy processor (e.g. third-party fake) that lacks streaming
+            # — fall back to a single non-streaming call and emit one delta.
+            try:
+                with self.acquire_slot():
+                    full = processor.process_text(transcript=raw_text, language=request.language)
+            except SpeechAPIError:
+                raise
+            except Exception as exc:
+                yield _make_final(raw_text, error=str(exc))
+                return
+            if full:
+                yield {
+                    "done": False,
+                    "delta": full,
+                    "response": full,
+                    "message": {"role": "assistant", "content": full},
+                    "model": model_name,
+                }
+            yield _make_final(full or raw_text, error=None)
+            return
+
+        aggregated: list[str] = []
+        try:
+            with self.acquire_slot():
+                for delta in stream_fn(transcript=raw_text, language=request.language):
+                    if not delta:
+                        continue
+                    aggregated.append(delta)
+                    yield {
+                        "done": False,
+                        "delta": delta,
+                        "response": delta,
+                        "message": {"role": "assistant", "content": delta},
+                        "model": model_name,
+                    }
+        except SpeechAPIError:
+            raise
+        except Exception as exc:
+            yield _make_final(raw_text, error=str(exc))
+            return
+
+        full = "".join(aggregated).strip() or raw_text
+        yield _make_final(full, error=None)
 
 
 def _to_bool(value: str | None, default: bool = False) -> bool:
@@ -653,6 +871,8 @@ def parse_speech_api_request(
         "postprocess_mode": lambda: _payload_scalar(payload, "postprocess_mode"),
         "postprocess_prompt": lambda: _payload_scalar(payload, "postprocess_prompt"),
         "postprocess_timeout": lambda: _to_float(_payload_scalar(payload, "postprocess_timeout"), 30.0),
+        "postprocess_backend": lambda: _payload_scalar(payload, "postprocess_backend"),
+        "postprocess_max_tokens": lambda: _to_int(_payload_scalar(payload, "postprocess_max_tokens"), None),
     }
     for field_name, parser in scalar_option_parsers.items():
         aliases = {
@@ -734,11 +954,14 @@ def parse_postprocess_api_request(
         )
 
     option_kwargs: dict[str, Any] = {}
+    max_tokens_explicit = False
     for key, value in dict(default_options or {}).items():
         normalized_key = key.replace("postprocess_", "") if key.startswith("postprocess_") else key
         if normalized_key == "postprocess":
             normalized_key = "enabled"
         option_kwargs[normalized_key] = value
+        if normalized_key == "max_tokens" and value is not None:
+            max_tokens_explicit = True
     if _payload_scalar(payload, "postprocess", "enabled") is not None:
         option_kwargs["enabled"] = _to_bool(_payload_scalar(payload, "postprocess", "enabled"), False)
     if _payload_scalar(payload, "model", "postprocess_model") is not None:
@@ -753,15 +976,27 @@ def parse_postprocess_api_request(
         option_kwargs["prompt"] = _payload_scalar(payload, "prompt", "postprocess_prompt")
     if _payload_scalar(payload, "timeout", "postprocess_timeout") is not None:
         option_kwargs["timeout"] = _to_float(_payload_scalar(payload, "timeout", "postprocess_timeout"), 30.0)
+    if _payload_scalar(payload, "backend", "postprocess_backend") is not None:
+        option_kwargs["backend"] = _payload_scalar(payload, "backend", "postprocess_backend")
+    if _payload_scalar(payload, "max_tokens", "postprocess_max_tokens") is not None:
+        option_kwargs["max_tokens"] = _to_int(
+            _payload_scalar(payload, "max_tokens", "postprocess_max_tokens"), None
+        )
+        max_tokens_explicit = True
 
     if "enabled" not in option_kwargs:
         option_kwargs["enabled"] = True
+
+    stream_scalar = _payload_scalar(payload, "stream")
+    stream = _to_bool(stream_scalar, False) if stream_scalar is not None else False
+    option_kwargs["max_tokens_explicit"] = max_tokens_explicit
 
     return TextPostProcessRequest(
         text=text,
         language=_payload_scalar(payload, "language"),
         response_format=response_format,
         options=PostProcessOptions(**option_kwargs),
+        stream=stream,
     )
 
 
@@ -877,6 +1112,97 @@ def make_handler(state: SpeechAPIState):
                 )
             return self.rfile.read(content_length)
 
+        def _stream_postprocess(
+            self,
+            *,
+            request: TextPostProcessRequest,
+            started_at: float,
+            request_id: str,
+        ) -> None:
+            """Write an OpenAI-style SSE response for /v1/text/* streaming."""
+
+            try:
+                iterator = state.stream_postprocess(request)
+            except SpeechAPIError as exc:
+                state.record_failure()
+                self._send(
+                    exc.status_code,
+                    _json_error(exc.status_code, exc.message),
+                    request_id=request_id,
+                )
+                return
+            except Exception as exc:
+                state.record_failure()
+                self._send(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    _json_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc)),
+                    request_id=request_id,
+                )
+                return
+
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-transform")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.send_header("X-Accel-Buffering", "no")
+            self._write_common_headers(
+                request_id=request_id,
+                model=(request.options.model or state.config.model),
+            )
+            self.end_headers()
+
+            final_event: dict[str, Any] | None = None
+            failed = False
+            try:
+                for event in iterator:
+                    if event.get("done"):
+                        final_event = event
+                        self._write_sse_chunk(event)
+                        meta = event.get("postprocess") or {}
+                        if isinstance(meta, dict) and meta.get("error"):
+                            failed = True
+                    else:
+                        self._write_sse_chunk(event)
+                self._write_sse_done()
+            except Exception as exc:
+                state.record_failure()
+                try:
+                    self._write_sse_chunk({"done": True, "error": str(exc)})
+                    self._write_sse_done()
+                except Exception:
+                    pass
+                return
+            finally:
+                try:
+                    self._write_chunk_trailer()
+                except Exception:
+                    pass
+
+            processing_ms = int((time.perf_counter() - started_at) * 1000)
+            if failed or final_event is None:
+                state.record_failure()
+            else:
+                state.record_success(processing_ms / 1000.0)
+
+        def _write_chunk(self, data: bytes) -> None:
+            self.wfile.write(f"{len(data):x}\r\n".encode("ascii"))
+            self.wfile.write(data)
+            self.wfile.write(b"\r\n")
+            self.wfile.flush()
+
+        def _write_chunk_trailer(self) -> None:
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+
+        def _write_sse_chunk(self, event: dict[str, Any]) -> None:
+            payload = json.dumps(event, ensure_ascii=False)
+            frame = f"data: {payload}\n\n".encode("utf-8")
+            self._write_chunk(frame)
+
+        def _write_sse_done(self) -> None:
+            self._write_chunk(b"data: [DONE]\n\n")
+
         def log_message(self, format: str, *args) -> None:
             return None
 
@@ -915,7 +1241,8 @@ def make_handler(state: SpeechAPIState):
                 forced_task = None
             elif parsed.path == "/v1/audio/translations":
                 forced_task = "translate"
-            elif parsed.path in {"/v1/text/postprocess", "/v1/postprocess"}:
+            elif parsed.path in POSTPROCESS_ROUTE_MODES:
+                forced_mode = POSTPROCESS_ROUTE_MODES[parsed.path]
                 try:
                     body = self._read_body()
                     content_type = self.headers.get("Content-Type", "application/octet-stream")
@@ -924,6 +1251,26 @@ def make_handler(state: SpeechAPIState):
                         body=body,
                         default_options=state._postprocess_defaults,
                     )
+                    if forced_mode is not None:
+                        request.options = dataclasses.replace(
+                            request.options,
+                            mode=forced_mode,
+                            max_tokens=(
+                                request.options.max_tokens
+                                if request.options.max_tokens_explicit
+                                else None
+                            ),
+                            max_tokens_explicit=request.options.max_tokens_explicit,
+                        )
+
+                    if request.stream:
+                        self._stream_postprocess(
+                            request=request,
+                            started_at=started_at,
+                            request_id=request_id,
+                        )
+                        return
+
                     payload = state.postprocess_text(request)
                     response_content_type, response_body = build_postprocess_response(
                         payload,
@@ -1007,6 +1354,29 @@ def create_server(state: SpeechAPIState) -> DaydreamSpeechHTTPServer:
     return DaydreamSpeechHTTPServer((state.config.host, state.config.port), handler, state=state)
 
 
+def _preload_state(state: SpeechAPIState, model: str) -> None:
+    errors: list[Exception] = []
+    errors_lock = threading.Lock()
+
+    def _run(func, *args) -> None:
+        try:
+            func(*args)
+        except Exception as exc:
+            with errors_lock:
+                errors.append(exc)
+
+    threads = [
+        threading.Thread(target=_run, args=(state.warmup, model), daemon=True),
+        threading.Thread(target=_run, args=(state.warmup_postprocess,), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if errors:
+        raise errors[0]
+
+
 def start_server(
     *,
     model: str,
@@ -1046,7 +1416,7 @@ def start_server(
     resolved_model = ensure_runtime_model(model, auto_pull=auto_pull, register_alias=False)
     validate_runtime_model(resolved_model, source_name=model)
     if preload:
-        state.warmup(model)
+        _preload_state(state, model)
 
     server = create_server(state)
     base_url = f"http://{host}:{port}"
@@ -1055,14 +1425,32 @@ def start_server(
     console.print(f"[dim]Max concurrency:[/] {max_concurrency}")
     console.print(f"[dim]Preload:[/] {'enabled' if preload else 'disabled'}")
     console.print(f"[dim]CORS allow-origin:[/] {state.config.allow_origin}")
-    if state._postprocess_defaults.get("postprocess"):
+    post_status = state.postprocess_status()
+    if post_status["configured"]:
         console.print(
-            f"[dim]Default post-process model:[/] {state._postprocess_defaults.get('postprocess_model') or 'unset'}"
+            f"[dim]Post-process:[/] {post_status['backend']} · {post_status['model']} "
+            f"(mode={post_status['mode']})"
         )
+    elif post_status["enabled"]:
+        console.print(
+            "[yellow]Post-process enabled but not fully configured[/] "
+            "(missing model or backend target)."
+        )
+    console.print("[dim]Routes:[/]")
+    console.print(f"  [cyan]GET[/]  {base_url}/health")
+    console.print(f"  [cyan]GET[/]  {base_url}/ready")
+    console.print(f"  [cyan]GET[/]  {base_url}/metrics")
+    console.print(f"  [cyan]GET[/]  {base_url}/v1/models")
+    console.print(f"  [magenta]POST[/] {base_url}/v1/audio/transcriptions")
+    console.print(f"  [magenta]POST[/] {base_url}/v1/audio/translations")
+    console.print(f"  [magenta]POST[/] {base_url}/v1/text/postprocess")
+    console.print(f"  [magenta]POST[/] {base_url}/v1/text/clean")
+    console.print(f"  [magenta]POST[/] {base_url}/v1/text/summary")
+    console.print(f"  [magenta]POST[/] {base_url}/v1/text/meeting-notes")
+    console.print(f"  [magenta]POST[/] {base_url}/v1/text/speakers")
     console.print(
-        "[dim]Routes:[/] GET /health, GET /ready, GET /metrics, GET /v1/models, "
-        "POST /v1/audio/transcriptions, POST /v1/audio/translations, "
-        "POST /v1/text/postprocess, POST /v1/postprocess"
+        "[dim]Streaming:[/] POST the same /v1/text/* routes with "
+        "[bold]\"stream\": true[/] for SSE output."
     )
 
     try:

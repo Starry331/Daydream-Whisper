@@ -12,19 +12,20 @@ from dwhisper import __version__
 from dwhisper.config import (
     get_default_corrections_path,
     get_default_audio_device,
+    get_configured_postprocess_max_tokens,
     get_default_chunk_duration,
     get_default_language,
     get_default_model,
     get_default_output_format,
     get_default_overlap_duration,
     get_default_postprocess_api_key,
+    get_default_postprocess_backend,
     get_default_postprocess_base_url,
     get_default_postprocess_enabled,
     get_default_postprocess_mode,
     get_default_postprocess_model,
     get_default_postprocess_timeout,
     get_default_profile,
-    get_default_profiles_path,
     get_default_push_to_talk,
     get_default_sample_rate,
     get_default_serve_allow_origin,
@@ -45,6 +46,12 @@ from dwhisper.utils import render_transcription_progress
 console = Console()
 err_console = Console(stderr=True)
 DEFAULT_LOCAL_POSTPROCESS_BASE_URL = "http://127.0.0.1:11435/v1"
+CONFIGURED_POSTPROCESS_MAX_TOKENS = get_configured_postprocess_max_tokens()
+POSTPROCESS_MAX_TOKENS_SHOW_DEFAULT = (
+    str(CONFIGURED_POSTPROCESS_MAX_TOKENS)
+    if CONFIGURED_POSTPROCESS_MAX_TOKENS is not None
+    else "mode-based"
+)
 
 
 def _handle_errors(func):
@@ -110,7 +117,9 @@ def _resolve_postprocess_shortcut(
     postprocess_mode: str,
     postprocess_prompt: str | None,
     postprocess_timeout: float,
-) -> tuple[bool, object, object, object, str, object, float]:
+    postprocess_backend: str = "auto",
+    postprocess_max_tokens: int | None = None,
+) -> tuple[bool, object, object, object, str, object, float, str, int | None]:
     shortcut_model = with_postprocess_model.strip() if with_postprocess_model else None
     shortcut_enabled = bool(shortcut_model)
     resolved_postprocess = bool(
@@ -159,6 +168,28 @@ def _resolve_postprocess_shortcut(
             profile_transcribe.get("postprocess_timeout"),
         )
     )
+    resolved_postprocess_backend = str(
+        _profile_value(
+            ctx,
+            "postprocess_backend",
+            postprocess_backend.lower(),
+            profile_transcribe.get("postprocess_backend") or postprocess_backend.lower(),
+        )
+    ).lower()
+    if resolved_postprocess_backend not in {"auto", "http", "mlx"}:
+        resolved_postprocess_backend = "auto"
+    resolved_postprocess_max_tokens_value = _profile_value(
+        ctx,
+        "postprocess_max_tokens",
+        postprocess_max_tokens,
+        profile_transcribe.get("postprocess_max_tokens"),
+    )
+    resolved_postprocess_max_tokens = (
+        int(resolved_postprocess_max_tokens_value)
+        if resolved_postprocess_max_tokens_value is not None
+        else None
+    )
+
     return (
         resolved_postprocess,
         resolved_postprocess_model,
@@ -167,6 +198,8 @@ def _resolve_postprocess_shortcut(
         resolved_postprocess_mode,
         resolved_postprocess_prompt,
         resolved_postprocess_timeout,
+        resolved_postprocess_backend,
+        resolved_postprocess_max_tokens,
     )
 
 
@@ -187,7 +220,7 @@ def _parse_vocabulary_entries(entries: tuple[str, ...]) -> dict[str, str]:
 def _load_selected_profile(name: str | None):
     from dwhisper.profiles import load_profile
 
-    return load_profile(name, profiles_path=get_default_profiles_path())
+    return load_profile(name)
 
 
 @click.group()
@@ -264,10 +297,12 @@ def list_profiles_command() -> None:
     """List named transcription profiles."""
     from dwhisper.profiles import load_profile_store
 
-    store = load_profile_store(get_default_profiles_path())
+    store = load_profile_store()
     profiles = store.list()
     if not profiles:
-        console.print("[dim]No profiles found. Create ~/.dwhisper/profiles.yaml to add reusable speech presets.[/dim]")
+        console.print(
+            "[dim]No profiles found. Create ~/.dwhisper/profiles.yaml or ~/.dwhisper/profiles/*.yaml to add reusable speech presets.[/dim]"
+        )
         return
 
     table = Table(show_header=True, header_style="bold")
@@ -324,7 +359,7 @@ def devices() -> None:
 
 @cli.command()
 @click.argument("audio_file", type=click.Path(exists=True, dir_okay=False, path_type=str))
-@click.option("--profile", default=None, help="Named transcription profile from ~/.dwhisper/profiles.yaml.")
+@click.option("--profile", default=None, help="Named transcription profile from ~/.dwhisper/profiles.yaml or ~/.dwhisper/profiles/*.yaml.")
 @click.option("--model", "-m", default=get_default_model(), show_default=True, help="Whisper model to use.")
 @click.option("--language", "-l", default=get_default_language(), help="Language code. Default: auto-detect.")
 @click.option(
@@ -385,6 +420,20 @@ def devices() -> None:
 )
 @click.option("--post-prompt", "--postprocess-prompt", "postprocess_prompt", default=None, help="Custom prompt template for post-processing. Supports {transcript}, {language}, and {mode}.")
 @click.option("--post-timeout", "--postprocess-timeout", "postprocess_timeout", type=float, default=get_default_postprocess_timeout(), show_default=True, help="Timeout in seconds for the optional local post-process request.")
+@click.option(
+    "--post-backend", "--postprocess-backend", "postprocess_backend",
+    type=click.Choice(["auto", "http", "mlx"], case_sensitive=False),
+    default=get_default_postprocess_backend(),
+    show_default=True,
+    help="Post-process backend. 'mlx' runs a local MLX LM in-process; 'http' calls an OpenAI-compatible server; 'auto' picks http when a base URL is set, otherwise mlx.",
+)
+@click.option(
+    "--post-max-tokens", "--postprocess-max-tokens", "postprocess_max_tokens",
+    type=int,
+    default=CONFIGURED_POSTPROCESS_MAX_TOKENS,
+    show_default=POSTPROCESS_MAX_TOKENS_SHOW_DEFAULT,
+    help="Max generated tokens for MLX post-processing.",
+)
 @click.option("--output", "-o", "output_path", type=click.Path(dir_okay=False, path_type=str), default=None, help="Write output to a file.")
 @click.option("--verbose", "-v", is_flag=True, help="Show timing and progress details.")
 @click.pass_context
@@ -415,6 +464,8 @@ def transcribe(
     postprocess_mode: str,
     postprocess_prompt: str | None,
     postprocess_timeout: float,
+    postprocess_backend: str,
+    postprocess_max_tokens: int | None,
     output_path: str | None,
     verbose: bool,
 ) -> None:
@@ -447,6 +498,8 @@ def transcribe(
         resolved_postprocess_mode,
         resolved_postprocess_prompt,
         resolved_postprocess_timeout,
+        resolved_postprocess_backend,
+        resolved_postprocess_max_tokens,
     ) = _resolve_postprocess_shortcut(
         ctx=ctx,
         profile_transcribe=profile_transcribe,
@@ -458,6 +511,8 @@ def transcribe(
         postprocess_mode=postprocess_mode,
         postprocess_prompt=postprocess_prompt,
         postprocess_timeout=postprocess_timeout,
+        postprocess_backend=postprocess_backend,
+        postprocess_max_tokens=postprocess_max_tokens,
     )
 
     options = TranscribeOptions(
@@ -488,6 +543,8 @@ def transcribe(
         postprocess_mode=resolved_postprocess_mode,
         postprocess_prompt=resolved_postprocess_prompt,
         postprocess_timeout=resolved_postprocess_timeout,
+        postprocess_backend=resolved_postprocess_backend,
+        postprocess_max_tokens=resolved_postprocess_max_tokens,
     )
 
     if verbose:
@@ -508,7 +565,7 @@ def transcribe(
 
 
 @cli.command()
-@click.option("--profile", default=None, help="Named transcription profile from ~/.dwhisper/profiles.yaml.")
+@click.option("--profile", default=None, help="Named transcription profile from ~/.dwhisper/profiles.yaml or ~/.dwhisper/profiles/*.yaml.")
 @click.option("--model", "-m", default=get_default_model(), show_default=True, help="Whisper model to use.")
 @click.option("--language", "-l", default=get_default_language(), help="Language code. Default: auto-detect.")
 @click.option(
@@ -581,6 +638,20 @@ def transcribe(
 )
 @click.option("--post-prompt", "--postprocess-prompt", "postprocess_prompt", default=None, help="Custom prompt template for post-processing. Supports {transcript}, {language}, and {mode}.")
 @click.option("--post-timeout", "--postprocess-timeout", "postprocess_timeout", type=float, default=get_default_postprocess_timeout(), show_default=True, help="Timeout in seconds for the optional local post-process request.")
+@click.option(
+    "--post-backend", "--postprocess-backend", "postprocess_backend",
+    type=click.Choice(["auto", "http", "mlx"], case_sensitive=False),
+    default=get_default_postprocess_backend(),
+    show_default=True,
+    help="Post-process backend for live voice input. 'mlx' keeps the model loaded locally for low-latency correction; 'http' calls an OpenAI-compatible server.",
+)
+@click.option(
+    "--post-max-tokens", "--postprocess-max-tokens", "postprocess_max_tokens",
+    type=int,
+    default=CONFIGURED_POSTPROCESS_MAX_TOKENS,
+    show_default=POSTPROCESS_MAX_TOKENS_SHOW_DEFAULT,
+    help="Max generated tokens for MLX post-processing (lower = faster per chunk).",
+)
 @click.option("--verbose", "-v", is_flag=True, help="Show additional realtime status.")
 @click.pass_context
 @_handle_errors
@@ -616,6 +687,8 @@ def listen(
     postprocess_mode: str,
     postprocess_prompt: str | None,
     postprocess_timeout: float,
+    postprocess_backend: str,
+    postprocess_max_tokens: int | None,
     verbose: bool,
 ) -> None:
     """Transcribe microphone input in realtime."""
@@ -649,6 +722,8 @@ def listen(
         resolved_postprocess_mode,
         resolved_postprocess_prompt,
         resolved_postprocess_timeout,
+        resolved_postprocess_backend,
+        resolved_postprocess_max_tokens,
     ) = _resolve_postprocess_shortcut(
         ctx=ctx,
         profile_transcribe=profile_transcribe,
@@ -660,6 +735,8 @@ def listen(
         postprocess_mode=postprocess_mode,
         postprocess_prompt=postprocess_prompt,
         postprocess_timeout=postprocess_timeout,
+        postprocess_backend=postprocess_backend,
+        postprocess_max_tokens=postprocess_max_tokens,
     )
     options = TranscribeOptions(
         profile=selected_profile.name if selected_profile is not None else profile,
@@ -689,6 +766,8 @@ def listen(
         postprocess_mode=resolved_postprocess_mode,
         postprocess_prompt=resolved_postprocess_prompt,
         postprocess_timeout=resolved_postprocess_timeout,
+        postprocess_backend=resolved_postprocess_backend,
+        postprocess_max_tokens=resolved_postprocess_max_tokens,
     )
     realtime_config = RealtimeConfig(
         sample_rate=int(_profile_value(ctx, "sample_rate", sample_rate, profile_listen.get("sample_rate"))),
@@ -780,6 +859,20 @@ def listen(
 )
 @click.option("--post-prompt", "--postprocess-prompt", "postprocess_prompt", default=None, help="Default custom prompt template for post-processing requests.")
 @click.option("--post-timeout", "--postprocess-timeout", "postprocess_timeout", type=float, default=get_default_postprocess_timeout(), show_default=True, help="Default timeout in seconds for the local post-process request.")
+@click.option(
+    "--post-backend", "--postprocess-backend", "postprocess_backend",
+    type=click.Choice(["auto", "http", "mlx"], case_sensitive=False),
+    default=get_default_postprocess_backend(),
+    show_default=True,
+    help="Default backend for transcript post-processing. 'mlx' runs a local MLX LM in-process; 'http' uses an OpenAI-compatible endpoint; 'auto' picks http when a base URL is set, otherwise mlx.",
+)
+@click.option(
+    "--post-max-tokens", "--postprocess-max-tokens", "postprocess_max_tokens",
+    type=int,
+    default=CONFIGURED_POSTPROCESS_MAX_TOKENS,
+    show_default=POSTPROCESS_MAX_TOKENS_SHOW_DEFAULT,
+    help="Default max generated tokens for MLX post-processing.",
+)
 @_handle_errors
 def serve(
     model: str,
@@ -799,6 +892,8 @@ def serve(
     postprocess_mode: str,
     postprocess_prompt: str | None,
     postprocess_timeout: float,
+    postprocess_backend: str,
+    postprocess_max_tokens: int | None,
 ) -> None:
     """Serve a speech-to-text HTTP API for local dictation and transcription apps."""
     from dwhisper.server import start_server
@@ -818,7 +913,10 @@ def serve(
         "postprocess_mode": postprocess_mode.lower(),
         "postprocess_prompt": postprocess_prompt,
         "postprocess_timeout": postprocess_timeout,
+        "postprocess_backend": postprocess_backend.lower(),
     }
+    if postprocess_max_tokens is not None:
+        postprocess_defaults["postprocess_max_tokens"] = int(postprocess_max_tokens)
 
     start_server(
         model=model,
@@ -832,6 +930,58 @@ def serve(
         allow_origin=allow_origin,
         postprocess_defaults=postprocess_defaults,
     )
+
+
+@cli.command()
+@click.option(
+    "--strict/--no-strict",
+    default=False,
+    show_default=True,
+    help="Exit non-zero when any check reports a warning or error.",
+)
+@_handle_errors
+def doctor(strict: bool) -> None:
+    """Check environment readiness: Python, MLX, PortAudio, cache, postprocess."""
+    from dwhisper.doctor import run_doctor, summarize, worst_status
+
+    results = run_doctor()
+
+    style_map = {
+        "ok": ("green", "[OK]"),
+        "warn": ("yellow", "[WARN]"),
+        "error": ("red", "[FAIL]"),
+        "info": ("dim", "[INFO]"),
+    }
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("", style="bold", width=7)
+    table.add_column("CHECK", style="cyan")
+    table.add_column("DETAIL")
+
+    for check in results:
+        color, marker = style_map.get(check.status, ("", "[?]"))
+        table.add_row(
+            f"[{color}]{marker}[/{color}]" if color else marker,
+            check.name,
+            check.message,
+        )
+    console.print(table)
+
+    for check in results:
+        if check.hint and check.status in {"warn", "error"}:
+            console.print(f"[dim]↳[/dim] [bold]{check.name}[/]: {check.hint}")
+
+    summary = summarize(results)
+    console.print(
+        f"[dim]Summary:[/dim] [green]{summary['ok']} ok[/green] · "
+        f"[yellow]{summary['warn']} warn[/yellow] · "
+        f"[red]{summary['error']} error[/red] · "
+        f"[dim]{summary['info']} info[/dim]"
+    )
+
+    overall = worst_status(results)
+    if overall == "error" or (strict and overall in {"error", "warn"}):
+        raise SystemExit(1)
 
 
 cli.add_command(transcribe, name="run")

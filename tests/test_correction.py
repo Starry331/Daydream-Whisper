@@ -147,5 +147,47 @@ class CorrectionTests(unittest.TestCase):
         )
 
 
+class AutoPunctuationTests(unittest.TestCase):
+    def test_auto_punctuation_collapses_repeated_terminals(self) -> None:
+        corrector = TranscriptCorrector(config=CorrectionConfig())
+
+        self.assertEqual(corrector.correct_text("wait... really??"), "wait. really?")
+
+    def test_auto_punctuation_inserts_space_after_latin_punct(self) -> None:
+        corrector = TranscriptCorrector(config=CorrectionConfig())
+
+        self.assertEqual(
+            corrector.correct_text("hello,world.how are you"),
+            "hello, world. how are you",
+        )
+
+    def test_auto_punctuation_leaves_cjk_punct_untouched(self) -> None:
+        corrector = TranscriptCorrector(config=CorrectionConfig())
+
+        # Three full-width periods should collapse to one; no Latin spacing
+        # rules should fire on the CJK text.
+        self.assertEqual(corrector.correct_text("你好。。。世界"), "你好。世界")
+
+    def test_ensure_terminal_punctuation_prefers_full_width_for_cjk(self) -> None:
+        corrector = TranscriptCorrector(
+            config=CorrectionConfig(ensure_terminal_punctuation=True)
+        )
+
+        self.assertEqual(corrector.correct_text("你好世界"), "你好世界。")
+        self.assertEqual(corrector.correct_text("hello world"), "hello world.")
+
+    def test_auto_punctuation_can_be_disabled(self) -> None:
+        corrector = TranscriptCorrector(
+            config=CorrectionConfig(auto_punctuation=False)
+        )
+
+        # Without auto_punctuation the stray run and missing-space artefacts
+        # come through exactly as Whisper produced them.
+        self.assertEqual(
+            corrector.correct_text("wait... really??"),
+            "wait... really??",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

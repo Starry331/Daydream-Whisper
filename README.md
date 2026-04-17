@@ -17,6 +17,8 @@ curl -fsSL https://raw.githubusercontent.com/Starry331/Daydream-Whisper/main/ins
 zsh /tmp/dwhisper-install.sh
 ```
 
+The GitHub repo lives at `https://github.com/Starry331/Daydream-Whisper`. The project name and executable stay `Daydream Whisper` and `dwhisper`.
+
 ### 2. Pull a starter model
 
 ```bash
@@ -38,7 +40,7 @@ dwhisper listen --model whisper:base
 ### 5. Serve a local API for other apps
 
 ```bash
-dwhisper serve --model whisper:base --host 127.0.0.1 --port 11434
+dwhisper serve --model whisper:base --host 127.0.0.1 --port 11500
 ```
 
 ### 6. Optional transcript cleanup with a local text or multimodal model
@@ -147,11 +149,29 @@ The uninstaller is intentionally conservative:
 | `dwhisper rm <model>` | Remove a cached model | Add `--force` to skip prompt |
 | `dwhisper show <model>` | Print local model metadata | Useful for debugging model directories |
 | `dwhisper models` | List built-in aliases | Shows local vs Hugging Face source |
-| `dwhisper profiles` | List reusable profiles | Reads `~/.dwhisper/profiles.yaml` |
+| `dwhisper profiles` | List reusable profiles | Reads `~/.dwhisper/profiles.yaml` and `~/.dwhisper/profiles/*.yaml` |
 | `dwhisper run <audio>` | Transcribe a file | Alias of `dwhisper transcribe` |
 | `dwhisper listen` | Realtime microphone transcription | Supports VAD and push-to-talk |
 | `dwhisper devices` | List input devices | Helps choose `--device` |
 | `dwhisper serve` | Start local speech API server | Designed for external voice apps |
+| `dwhisper doctor` | Check local environment readiness | Verifies Python, MLX, PortAudio, cache, and post-process defaults |
+
+### Environment Check
+
+Run `dwhisper doctor` after install or when microphone capture, serving, or local post-processing behaves unexpectedly.
+
+It checks:
+
+- Python version
+- `mlx-whisper` and MLX device availability
+- `sounddevice` / PortAudio
+- visible input devices
+- writable `~/.dwhisper` home
+- default serve port availability
+- free disk space and cached Whisper models
+- local post-process defaults
+
+Use `dwhisper doctor --strict` if warnings should also return a non-zero exit code.
 
 ## Simple Configuration
 
@@ -161,6 +181,7 @@ The common files are:
 
 - `~/.dwhisper/config.yaml`
 - `~/.dwhisper/profiles.yaml`
+- `~/.dwhisper/profiles/`
 - `~/.dwhisper/corrections.yaml`
 - `~/.dwhisper/vocabulary.yaml`
 - `~/.dwhisper/models/`
@@ -204,7 +225,7 @@ listen:
 
 serve:
   host: 127.0.0.1
-  port: 11434
+  port: 11500
   max_concurrency: 2
   request_timeout: 120
   max_request_bytes: 52428800
@@ -248,7 +269,7 @@ Useful examples:
 When `dwhisper serve` is running on the default port, the local base URL is:
 
 ```text
-http://127.0.0.1:11434
+http://127.0.0.1:11500
 ```
 
 ### Route overview
@@ -262,15 +283,19 @@ http://127.0.0.1:11434
 | `/v1/audio/transcriptions` | `POST` | Speech-to-text transcription | OpenAI-style audio transcription route |
 | `/v1/audio/translations` | `POST` | Speech translation | OpenAI-style audio translation route |
 | `/v1/text/postprocess` | `POST` | Text-only cleanup, summary, or formatting | Daydream Whisper post-process route |
+| `/v1/text/clean` | `POST` | Text cleanup | Pinned `mode=clean` shortcut |
+| `/v1/text/summary` | `POST` | Transcript summarization | Pinned `mode=summary` shortcut |
+| `/v1/text/meeting-notes` | `POST` | Meeting notes formatting | Pinned `mode=meeting-notes` shortcut |
+| `/v1/text/speakers` | `POST` | Speaker formatting | Pinned `mode=speaker-format` shortcut |
 | `/v1/postprocess` | `POST` | Alias of the text post-process route | Short local alias |
 
 ### Health endpoints
 
 ```bash
-curl http://127.0.0.1:11434/health
-curl http://127.0.0.1:11434/ready
-curl http://127.0.0.1:11434/metrics
-curl http://127.0.0.1:11434/v1/models
+curl http://127.0.0.1:11500/health
+curl http://127.0.0.1:11500/ready
+curl http://127.0.0.1:11500/metrics
+curl http://127.0.0.1:11500/v1/models
 ```
 
 ### File transcription over API
@@ -278,7 +303,7 @@ curl http://127.0.0.1:11434/v1/models
 Multipart request:
 
 ```bash
-curl http://127.0.0.1:11434/v1/audio/transcriptions \
+curl http://127.0.0.1:11500/v1/audio/transcriptions \
   -F file=@./meeting.wav \
   -F model=whisper:base \
   -F language=zh \
@@ -288,7 +313,7 @@ curl http://127.0.0.1:11434/v1/audio/transcriptions \
 JSON request with a local path:
 
 ```bash
-curl http://127.0.0.1:11434/v1/audio/transcriptions \
+curl http://127.0.0.1:11500/v1/audio/transcriptions \
   -H "Content-Type: application/json" \
   -d '{
     "audio_path": "/absolute/path/to/meeting.wav",
@@ -300,7 +325,7 @@ curl http://127.0.0.1:11434/v1/audio/transcriptions \
 ### Translation over API
 
 ```bash
-curl http://127.0.0.1:11434/v1/audio/translations \
+curl http://127.0.0.1:11500/v1/audio/translations \
   -H "Content-Type: application/json" \
   -d '{
     "audio_path": "/absolute/path/to/meeting.wav",
@@ -314,7 +339,7 @@ curl http://127.0.0.1:11434/v1/audio/translations \
 Use this when another app already has text and only wants cleanup, summary, meeting notes, or speaker formatting.
 
 ```bash
-curl http://127.0.0.1:11434/v1/text/postprocess \
+curl http://127.0.0.1:11500/v1/text/postprocess \
   -H "Content-Type: application/json" \
   -d '{
     "text": "helo world this is messy",
@@ -333,10 +358,90 @@ POST /v1/postprocess
 
 It is an alias for the same text-only route.
 
+Mode-pinned shortcuts are also available:
+
+```text
+POST /v1/text/clean
+POST /v1/text/summary
+POST /v1/text/meeting-notes
+POST /v1/text/speakers
+```
+
+### Streaming SSE for `/v1/text/*`
+
+Any `/v1/text/*` route can stream incremental deltas over SSE by adding `"stream": true`.
+
+```bash
+curl -N http://127.0.0.1:11500/v1/text/summary \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "helo world this is messy",
+    "model": "glm-4.1v",
+    "base_url": "http://127.0.0.1:11435/v1",
+    "stream": true
+  }'
+```
+
+Response details:
+
+- content type is `text/event-stream`
+- each SSE frame is `data: { ... }`
+- the stream ends with `data: [DONE]`
+- the last JSON frame before `[DONE]` includes `done: true`, the aggregate `text`, the original `raw_text`, and `postprocess` metadata so clients can reconstruct the final result from that frame alone
+
+### App integration examples
+
+`dwhisper` serves by default on `http://127.0.0.1:11500` so it does not collide with the original Daydream CLI on port `11434`.
+
+Common values to fill into another app:
+
+```text
+OpenAI-compatible Base URL: http://127.0.0.1:11500/v1
+```
+
+Full routes:
+
+- transcription: `POST http://127.0.0.1:11500/v1/audio/transcriptions`
+- translation: `POST http://127.0.0.1:11500/v1/audio/translations`
+- text cleanup: `POST http://127.0.0.1:11500/v1/text/clean`
+- summary: `POST http://127.0.0.1:11500/v1/text/summary`
+- meeting notes: `POST http://127.0.0.1:11500/v1/text/meeting-notes`
+- speaker formatting: `POST http://127.0.0.1:11500/v1/text/speakers`
+- generic post-process: `POST http://127.0.0.1:11500/v1/text/postprocess`
+- SSE streaming: add `"stream": true` to any `/v1/text/*` request body
+- health and capability checks: `GET http://127.0.0.1:11500/health`, `/ready`, `/metrics`, `/v1/models`
+
+API key:
+
+- default is `dwhisper-local`
+- this is only a placeholder and local serving does not enforce auth
+- if a third-party app requires an API key field, fill in `dwhisper-local`
+
+Examples:
+
+- [闪电说](https://shandianshuo.cn) or another OpenAI-compatible third-party app will usually want `http://127.0.0.1:11500/v1` as the Base URL
+- an app that sends speech should call `POST /v1/audio/transcriptions`
+- an app that already has plain text and wants rewriting should call `POST /v1/text/postprocess`
+- an app that wants streaming summaries should call `POST /v1/text/summary` with `"stream": true`
+
+If the port is already in use, change it with `dwhisper serve --port <N>` or `DWHISPER_PORT`.
+
+Minimal reference:
+
+```text
+Server root: http://127.0.0.1:11500
+Base URL: http://127.0.0.1:11500/v1
+API Key: dwhisper-local
+Speech route: POST /v1/audio/transcriptions
+Text route: POST /v1/text/postprocess
+Streaming summary route: POST /v1/text/summary
+Meeting notes route: POST /v1/text/meeting-notes
+```
+
 ### Audio transcription with optional post-processing
 
 ```bash
-curl http://127.0.0.1:11434/v1/audio/transcriptions \
+curl http://127.0.0.1:11500/v1/audio/transcriptions \
   -H "Content-Type: application/json" \
   -d '{
     "audio_path": "/absolute/path/to/meeting.wav",
@@ -386,12 +491,20 @@ For `/v1/text/postprocess` and `/v1/postprocess`:
 - `mode`
 - `prompt`
 - `timeout`
+- `backend`
+- `max_tokens`
+- `stream`
 
 ## Advanced Usage
 
 ### 1. Profiles
 
 Use profiles when you want stable presets for meetings, dictation, subtitles, interviews, or domain terms.
+
+Both storage styles are supported:
+
+- single file: `~/.dwhisper/profiles.yaml`
+- one file per profile: `~/.dwhisper/profiles/meeting.yaml`
 
 Example `~/.dwhisper/profiles.yaml`:
 
@@ -423,6 +536,20 @@ Use it like this:
 ```bash
 dwhisper run ./meeting.wav --profile meeting-zh
 dwhisper listen --profile meeting-zh
+```
+
+Equivalent per-profile file example `~/.dwhisper/profiles/meeting.yaml`:
+
+```yaml
+model: whisper:large-v3-turbo
+output_format: text
+transcribe:
+  language: zh
+  postprocess: true
+  postprocess_model: glm-4.1v
+  postprocess_mode: meeting-notes
+listen:
+  chunk_duration: 2.8
 ```
 
 ### 2. Corrections and vocabulary
@@ -488,6 +615,13 @@ Supported post-process modes:
 - `summary`
 - `meeting-notes`
 - `speaker-format`
+
+If you do not explicitly set `--post-max-tokens`, dwhisper uses mode-aware defaults:
+
+- `clean`: `256`
+- `summary`: `768`
+- `speaker-format`: `1024`
+- `meeting-notes`: `2048`
 
 The same pattern also works in listen mode:
 
@@ -583,13 +717,15 @@ No. Any local text or multimodal model served through an OpenAI-compatible endpo
 
 - For speech files or file paths: `POST /v1/audio/transcriptions`
 - For speech translation: `POST /v1/audio/translations`
-- For text-only cleanup or summarization: `POST /v1/text/postprocess`
+- For generic text-only cleanup or summarization: `POST /v1/text/postprocess`
+- For mode-pinned text routes: `POST /v1/text/clean`, `/v1/text/summary`, `/v1/text/meeting-notes`, or `/v1/text/speakers`
+- For streaming text post-process responses: add `"stream": true` to any `/v1/text/*` request
 - For health checks: `GET /health` or `GET /ready`
 - For monitoring: `GET /metrics`
 
 ### Where should I put my default config?
 
-Start with `~/.dwhisper/config.yaml`. Put reusable presets in `~/.dwhisper/profiles.yaml`.
+Start with `~/.dwhisper/config.yaml`. Put reusable presets in `~/.dwhisper/profiles.yaml` or `~/.dwhisper/profiles/*.yaml`.
 
 ### What if microphone capture is unstable?
 
@@ -599,6 +735,7 @@ Try these first:
 - raise `silence_threshold`
 - switch devices with `dwhisper devices` and `--device`
 - use `--push-to-talk` for deterministic capture
+- run `dwhisper doctor` to verify PortAudio, permissions, and visible input devices
 
 ### What if a local post-process model is slow?
 
@@ -627,6 +764,8 @@ curl -fsSL https://raw.githubusercontent.com/Starry331/Daydream-Whisper/main/ins
 zsh /tmp/dwhisper-install.sh
 ```
 
+当前 GitHub 仓库地址是 `https://github.com/Starry331/Daydream-Whisper`。项目名和命令名仍然分别保持为 `Daydream Whisper` 与 `dwhisper`。
+
 ### 2. 下载一个起步模型
 
 ```bash
@@ -648,7 +787,7 @@ dwhisper listen --model whisper:base
 ### 5. 给其他应用提供本地 API
 
 ```bash
-dwhisper serve --model whisper:base --host 127.0.0.1 --port 11434
+dwhisper serve --model whisper:base --host 127.0.0.1 --port 11500
 ```
 
 ### 6. 用本地文本或多模态模型做可选后处理
@@ -746,11 +885,33 @@ zsh /tmp/dwhisper-uninstall.sh
 | `dwhisper rm <model>` | 删除本地缓存模型 | 可加 `--force` |
 | `dwhisper show <model>` | 查看模型元数据 | 适合调试模型目录 |
 | `dwhisper models` | 查看内置别名 | 会显示来源 |
-| `dwhisper profiles` | 查看 profile 列表 | 读取 `~/.dwhisper/profiles.yaml` |
+| `dwhisper profiles` | 查看 profile 列表 | 读取 `~/.dwhisper/profiles.yaml` 与 `~/.dwhisper/profiles/*.yaml` |
 | `dwhisper run <audio>` | 转录文件 | `transcribe` 的别名 |
 | `dwhisper listen` | 实时麦克风听写 | 支持 VAD 和按键说话 |
 | `dwhisper devices` | 列出输入设备 | 方便选择 `--device` |
 | `dwhisper serve` | 启动本地语音 API | 便于外部语音应用接入 |
+| `dwhisper doctor` | 做环境自检 | 检查 Python、MLX、PortAudio、缓存和后处理默认配置 |
+
+### 环境自检
+
+安装完成后，或者你怀疑麦克风、服务端、后处理模型有环境问题时，先跑一次：
+
+```bash
+dwhisper doctor
+```
+
+它会检查：
+
+- Python 版本
+- `mlx-whisper` 与 MLX 设备
+- `sounddevice` / PortAudio
+- 当前可见输入设备
+- `~/.dwhisper` home 是否可写
+- 默认服务端口是否被占用
+- 磁盘剩余空间与本地 Whisper 缓存
+- 文本后处理默认配置
+
+如果你想把 warning 也视为失败，可以用 `dwhisper doctor --strict`。
 
 ## 基础配置教程
 
@@ -758,6 +919,7 @@ zsh /tmp/dwhisper-uninstall.sh
 
 - `~/.dwhisper/config.yaml`
 - `~/.dwhisper/profiles.yaml`
+- `~/.dwhisper/profiles/`
 - `~/.dwhisper/corrections.yaml`
 - `~/.dwhisper/vocabulary.yaml`
 - `~/.dwhisper/models/`
@@ -801,7 +963,7 @@ listen:
 
 serve:
   host: 127.0.0.1
-  port: 11434
+  port: 11500
   max_concurrency: 2
   request_timeout: 120
   max_request_bytes: 52428800
@@ -845,7 +1007,7 @@ serve:
 默认服务地址：
 
 ```text
-http://127.0.0.1:11434
+http://127.0.0.1:11500
 ```
 
 ### 路由总表
@@ -859,15 +1021,19 @@ http://127.0.0.1:11434
 | `/v1/audio/transcriptions` | `POST` | 语音转文字 | OpenAI 风格音频转录 |
 | `/v1/audio/translations` | `POST` | 语音翻译 | OpenAI 风格音频翻译 |
 | `/v1/text/postprocess` | `POST` | 纯文本后处理 | 文本清洗、摘要、纪要整理 |
+| `/v1/text/clean` | `POST` | 文本清洗 | 固定 `mode=clean` 的快捷路由 |
+| `/v1/text/summary` | `POST` | 文本摘要 | 固定 `mode=summary` 的快捷路由 |
+| `/v1/text/meeting-notes` | `POST` | 会议纪要整理 | 固定 `mode=meeting-notes` 的快捷路由 |
+| `/v1/text/speakers` | `POST` | 说话人格式整理 | 固定 `mode=speaker-format` 的快捷路由 |
 | `/v1/postprocess` | `POST` | 文本后处理短别名 | 与上面等价 |
 
 ### 健康检查与模型查询
 
 ```bash
-curl http://127.0.0.1:11434/health
-curl http://127.0.0.1:11434/ready
-curl http://127.0.0.1:11434/metrics
-curl http://127.0.0.1:11434/v1/models
+curl http://127.0.0.1:11500/health
+curl http://127.0.0.1:11500/ready
+curl http://127.0.0.1:11500/metrics
+curl http://127.0.0.1:11500/v1/models
 ```
 
 ### 音频转录 API
@@ -875,7 +1041,7 @@ curl http://127.0.0.1:11434/v1/models
 multipart 方式：
 
 ```bash
-curl http://127.0.0.1:11434/v1/audio/transcriptions \
+curl http://127.0.0.1:11500/v1/audio/transcriptions \
   -F file=@./meeting.wav \
   -F model=whisper:base \
   -F language=zh \
@@ -885,7 +1051,7 @@ curl http://127.0.0.1:11434/v1/audio/transcriptions \
 JSON 本地路径方式：
 
 ```bash
-curl http://127.0.0.1:11434/v1/audio/transcriptions \
+curl http://127.0.0.1:11500/v1/audio/transcriptions \
   -H "Content-Type: application/json" \
   -d '{
     "audio_path": "/absolute/path/to/meeting.wav",
@@ -897,7 +1063,7 @@ curl http://127.0.0.1:11434/v1/audio/transcriptions \
 ### 音频翻译 API
 
 ```bash
-curl http://127.0.0.1:11434/v1/audio/translations \
+curl http://127.0.0.1:11500/v1/audio/translations \
   -H "Content-Type: application/json" \
   -d '{
     "audio_path": "/absolute/path/to/meeting.wav",
@@ -911,7 +1077,7 @@ curl http://127.0.0.1:11434/v1/audio/translations \
 如果你的外部应用已经自己拿到了文字，只想做清洗、摘要、会议纪要整理，可以直接调用：
 
 ```bash
-curl http://127.0.0.1:11434/v1/text/postprocess \
+curl http://127.0.0.1:11500/v1/text/postprocess \
   -H "Content-Type: application/json" \
   -d '{
     "text": "helo world this is messy",
@@ -930,10 +1096,90 @@ POST /v1/postprocess
 
 它只是同一路由的短别名。
 
+另外还有固定模式快捷路由：
+
+```text
+POST /v1/text/clean
+POST /v1/text/summary
+POST /v1/text/meeting-notes
+POST /v1/text/speakers
+```
+
+### `/v1/text/*` 的 SSE 流式返回
+
+任意 `/v1/text/*` 路由都支持在请求体里加 `"stream": true`，返回 SSE 增量结果。
+
+```bash
+curl -N http://127.0.0.1:11500/v1/text/summary \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "helo world this is messy",
+    "model": "glm-4.1v",
+    "base_url": "http://127.0.0.1:11435/v1",
+    "stream": true
+  }'
+```
+
+返回约定：
+
+- `Content-Type` 是 `text/event-stream`
+- 每个 SSE frame 都是 `data: { ... }`
+- 结束时会再发一个 `data: [DONE]`
+- `[DONE]` 前最后一个 JSON frame 一定会带上 `done: true`、聚合后的 `text`、原始 `raw_text`，以及 `postprocess` 元信息，客户端只看最后一帧也能还原最终结果
+
+### 外部 App 接入示例
+
+`dwhisper` 服务端默认在 `http://127.0.0.1:11500`，这是为了避开原始 Daydream CLI 默认占用的 `11434` 端口。
+
+常用填法：
+
+```text
+OpenAI 兼容 Base URL: http://127.0.0.1:11500/v1
+```
+
+完整路由：
+
+- 转录：`POST http://127.0.0.1:11500/v1/audio/transcriptions`
+- 翻译：`POST http://127.0.0.1:11500/v1/audio/translations`
+- 文本纠错：`POST http://127.0.0.1:11500/v1/text/clean`
+- 摘要：`POST http://127.0.0.1:11500/v1/text/summary`
+- 会议纪要：`POST http://127.0.0.1:11500/v1/text/meeting-notes`
+- 说话人整理：`POST http://127.0.0.1:11500/v1/text/speakers`
+- 通用后处理：`POST http://127.0.0.1:11500/v1/text/postprocess`
+- SSE 流式：以上任意 `/v1/text/*` 请求体里加 `"stream": true`
+- 健康 / 能力探测：`GET http://127.0.0.1:11500/health`、`/ready`、`/metrics`、`/v1/models`
+
+API Key：
+
+- 默认是 `dwhisper-local`
+- 这里只是占位值，本地默认不做鉴权
+- 如果第三方 app 强制要求填写 API Key，就填 `dwhisper-local`
+
+常见接法：
+
+- [闪电说](https://shandianshuo.cn) 或其他 OpenAI 兼容第三方 app，通常把 Base URL 填成 `http://127.0.0.1:11500/v1`
+- 如果应用要直接上传语音做转写，调用 `POST /v1/audio/transcriptions`
+- 如果应用已经自己拿到了文字，只想做清洗、改写或摘要，调用 `POST /v1/text/postprocess`
+- 如果应用支持边生成边显示摘要，调用 `POST /v1/text/summary`，并加 `"stream": true`
+
+如果端口被占用，可以改成 `dwhisper serve --port <N>` 或设置 `DWHISPER_PORT`。
+
+最小接入对照：
+
+```text
+服务根地址: http://127.0.0.1:11500
+Base URL: http://127.0.0.1:11500/v1
+API Key: dwhisper-local
+语音转写: POST /v1/audio/transcriptions
+纯文本整理: POST /v1/text/postprocess
+流式摘要: POST /v1/text/summary
+会议纪要: POST /v1/text/meeting-notes
+```
+
 ### 转录后串接后处理模型
 
 ```bash
-curl http://127.0.0.1:11434/v1/audio/transcriptions \
+curl http://127.0.0.1:11500/v1/audio/transcriptions \
   -H "Content-Type: application/json" \
   -d '{
     "audio_path": "/absolute/path/to/meeting.wav",
@@ -983,12 +1229,20 @@ curl http://127.0.0.1:11434/v1/audio/transcriptions \
 - `mode`
 - `prompt`
 - `timeout`
+- `backend`
+- `max_tokens`
+- `stream`
 
 ## 进阶使用
 
 ### 1. Profile 预设
 
-如果你经常做会议、访谈、字幕、口述整理，建议写 `~/.dwhisper/profiles.yaml`。
+如果你经常做会议、访谈、字幕、口述整理，建议用 profile 预设。
+
+支持两种存放方式：
+
+- 单文件：`~/.dwhisper/profiles.yaml`
+- 按 profile 分文件：`~/.dwhisper/profiles/meeting.yaml`
 
 示例：
 
@@ -1020,6 +1274,20 @@ profiles:
 ```bash
 dwhisper run ./meeting.wav --profile meeting-zh
 dwhisper listen --profile meeting-zh
+```
+
+如果按文件拆分，也可以这样写 `~/.dwhisper/profiles/meeting.yaml`：
+
+```yaml
+model: whisper:large-v3-turbo
+output_format: text
+transcribe:
+  language: zh
+  postprocess: true
+  postprocess_model: glm-4.1v
+  postprocess_mode: meeting-notes
+listen:
+  chunk_duration: 2.8
 ```
 
 ### 2. 纠错与词汇表
@@ -1086,6 +1354,13 @@ dwhisper run ./meeting.wav \
 - `summary`
 - `meeting-notes`
 - `speaker-format`
+
+如果你不显式传 `--post-max-tokens`，dwhisper 会按模式自动选默认 token 预算：
+
+- `clean`：`256`
+- `summary`：`768`
+- `speaker-format`：`1024`
+- `meeting-notes`：`2048`
 
 监听模式也可以接：
 
@@ -1182,13 +1457,15 @@ dwhisper serve \
 
 - 上传音频或给本地音频路径：`POST /v1/audio/transcriptions`
 - 做语音翻译：`POST /v1/audio/translations`
-- 只整理已有文字：`POST /v1/text/postprocess`
+- 通用文字整理：`POST /v1/text/postprocess`
+- 固定模式文字整理：`POST /v1/text/clean`、`/v1/text/summary`、`/v1/text/meeting-notes`、`/v1/text/speakers`
+- 如果要流式结果：对任意 `/v1/text/*` 请求加 `"stream": true`
 - 做健康检查：`GET /health` 或 `GET /ready`
 - 做监控：`GET /metrics`
 
 ### 配置文件应该放哪里？
 
-从 `~/.dwhisper/config.yaml` 开始。可复用预设放到 `~/.dwhisper/profiles.yaml`。
+从 `~/.dwhisper/config.yaml` 开始。可复用预设放到 `~/.dwhisper/profiles.yaml` 或 `~/.dwhisper/profiles/*.yaml`。
 
 ### 麦克风不稳定怎么办？
 
@@ -1198,6 +1475,7 @@ dwhisper serve \
 - 提高 `silence_threshold`
 - 用 `dwhisper devices` 换设备
 - 直接开 `--push-to-talk`
+- 跑一次 `dwhisper doctor`，确认 PortAudio、权限和输入设备枚举是否正常
 
 ### 后处理模型很慢怎么办？
 

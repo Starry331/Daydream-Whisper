@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import dataclasses
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
 from dwhisper.server import (
     SpeechAPIConfig,
     SpeechAPIState,
+    _preload_state,
     build_postprocess_response,
     build_transcription_response,
     parse_postprocess_api_request,
@@ -307,6 +310,346 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(options.postprocess_model, "local-mm-model")
         self.assertEqual(options.postprocess_base_url, "http://127.0.0.1:11435/v1")
         self.assertEqual(options.postprocess_timeout, 18.0)
+
+
+class PostprocessBackendRoutingTests(unittest.TestCase):
+    def test_mlx_backend_is_accepted_without_base_url(self) -> None:
+        captured: dict[str, object] = {}
+
+        def factory(options):
+            captured["options"] = options
+            return mock.Mock(process_text=mock.Mock(return_value="Cleaned text."))
+
+        state = SpeechAPIState(
+            SpeechAPIConfig(
+                host="127.0.0.1",
+                port=11434,
+                model="whisper:base",
+                postprocess_defaults={
+                    "postprocess": True,
+                    "postprocess_model": "qwen3-mlx",
+                    "postprocess_backend": "mlx",
+                    "postprocess_mode": "clean",
+                },
+            ),
+            postprocessor_factory=factory,
+        )
+        request = parse_postprocess_api_request(
+            content_type="application/json",
+            body=b'{"text": "helo world"}',
+            default_options=state._postprocess_defaults,
+        )
+
+        payload = state.postprocess_text(request)
+
+        self.assertEqual(payload["text"], "Cleaned text.")
+        self.assertEqual(payload["postprocess"]["backend"], "mlx")
+        self.assertTrue(payload["postprocess"]["applied"])
+        self.assertNotIn("base_url", payload["postprocess"])
+        self.assertEqual(captured["options"].resolved_backend(), "mlx")
+
+    def test_request_can_override_backend_and_max_tokens(self) -> None:
+        request = parse_postprocess_api_request(
+            content_type="application/json",
+            body=(
+                "{"
+                "\"text\": \"helo world\","
+                "\"backend\": \"mlx\","
+                "\"max_tokens\": 128"
+                "}"
+            ).encode("utf-8"),
+            default_options={"enabled": True, "model": "qwen3-mlx", "backend": "http"},
+        )
+
+        self.assertEqual(request.options.backend, "mlx")
+        self.assertEqual(request.options.max_tokens, 128)
+        self.assertTrue(request.options.max_tokens_explicit)
+
+    def test_route_forced_mode_uses_mode_specific_tokens_when_max_tokens_is_implicit(self) -> None:
+        state = SpeechAPIState(
+            SpeechAPIConfig(
+                host="127.0.0.1",
+                port=11434,
+                model="whisper:base",
+                postprocess_defaults={
+                    "postprocess": True,
+                    "postprocess_model": "qwen3-mlx",
+                    "postprocess_backend": "mlx",
+                    "postprocess_mode": "clean",
+                },
+            ),
+        )
+        request = parse_postprocess_api_request(
+            content_type="application/json",
+            body=b'{"text": "helo world"}',
+            default_options=state._postprocess_defaults,
+        )
+        request.options = dataclasses.replace(
+            request.options,
+            mode="meeting-notes",
+            max_tokens=None if not request.options.max_tokens_explicit else request.options.max_tokens,
+            max_tokens_explicit=request.options.max_tokens_explicit,
+        )
+
+        resolved = state._resolve_postprocess_options(request)
+
+        self.assertEqual(resolved.mode, "meeting-notes")
+        self.assertEqual(resolved.max_tokens, 2048)
+
+    def test_failing_backend_returns_raw_text_and_error_metadata(self) -> None:
+        def factory(options):
+            processor = mock.Mock()
+            processor.process_text.side_effect = RuntimeError("boom")
+            return processor
+
+        state = SpeechAPIState(
+            SpeechAPIConfig(
+                host="127.0.0.1",
+                port=11434,
+                model="whisper:base",
+                postprocess_defaults={
+                    "postprocess": True,
+                    "postprocess_model": "qwen3-mlx",
+                    "postprocess_backend": "mlx",
+                },
+            ),
+            postprocessor_factory=factory,
+        )
+        request = parse_postprocess_api_request(
+            content_type="application/json",
+            body=b'{"text": "helo world"}',
+            default_options=state._postprocess_defaults,
+        )
+
+        payload = state.postprocess_text(request)
+
+        self.assertEqual(payload["text"], "helo world")
+        self.assertFalse(payload["postprocess"]["applied"])
+        self.assertEqual(payload["postprocess"]["error"], "boom")
+
+    def test_mode_route_map_covers_expected_paths(self) -> None:
+        from dwhisper.server import POSTPROCESS_ROUTE_MODES
+
+        self.assertEqual(POSTPROCESS_ROUTE_MODES["/v1/text/clean"], "clean")
+        self.assertEqual(POSTPROCESS_ROUTE_MODES["/v1/text/summary"], "summary")
+        self.assertEqual(POSTPROCESS_ROUTE_MODES["/v1/text/meeting-notes"], "meeting-notes")
+        self.assertEqual(POSTPROCESS_ROUTE_MODES["/v1/text/speakers"], "speaker-format")
+        self.assertIsNone(POSTPROCESS_ROUTE_MODES["/v1/text/postprocess"])
+
+    def test_health_payload_reports_postprocess_status(self) -> None:
+        state = SpeechAPIState(
+            SpeechAPIConfig(
+                host="127.0.0.1",
+                port=11500,
+                model="whisper:base",
+                postprocess_defaults={
+                    "postprocess": True,
+                    "postprocess_model": "qwen3-mlx",
+                    "postprocess_backend": "mlx",
+                    "postprocess_mode": "clean",
+                },
+            ),
+        )
+
+        status = state.status_payload()["postprocess"]
+
+        self.assertTrue(status["enabled"])
+        self.assertTrue(status["configured"])
+        self.assertEqual(status["backend"], "mlx")
+        self.assertEqual(status["model"], "qwen3-mlx")
+        self.assertIn("/v1/text/clean", status["routes"])
+
+    def test_warmup_postprocess_loads_mlx_backend(self) -> None:
+        calls: list[PostProcessOptions] = []
+
+        def factory(options):
+            captured = mock.Mock()
+            captured._ensure_loaded = mock.Mock(return_value=("m", "t"))
+            calls.append(options)
+            factory.processors = getattr(factory, "processors", [])
+            factory.processors.append(captured)
+            return captured
+
+        state = SpeechAPIState(
+            SpeechAPIConfig(
+                host="127.0.0.1",
+                port=11500,
+                model="whisper:base",
+                postprocess_defaults={
+                    "postprocess": True,
+                    "postprocess_model": "qwen3-mlx",
+                    "postprocess_backend": "mlx",
+                    "postprocess_mode": "clean",
+                },
+            ),
+            postprocessor_factory=factory,
+        )
+
+        result = state.warmup_postprocess()
+
+        self.assertTrue(result["warmed"])
+        self.assertEqual(calls[0].resolved_backend(), "mlx")
+        factory.processors[0]._ensure_loaded.assert_called_once_with()
+
+    def test_warmup_postprocess_is_safe_when_not_configured(self) -> None:
+        state = SpeechAPIState(
+            SpeechAPIConfig(host="127.0.0.1", port=11500, model="whisper:base"),
+        )
+
+        result = state.warmup_postprocess()
+
+        self.assertFalse(result["warmed"])
+        self.assertFalse(result["configured"])
+
+
+class DefaultPortTests(unittest.TestCase):
+    def test_default_port_is_not_11434(self) -> None:
+        from dwhisper.config import DEFAULT_PORT, get_default_port
+
+        self.assertNotEqual(DEFAULT_PORT, 11434)
+        self.assertEqual(get_default_port(), DEFAULT_PORT)
+
+
+class StreamPostprocessTests(unittest.TestCase):
+    def _build_state(self, processor) -> SpeechAPIState:
+        return SpeechAPIState(
+            SpeechAPIConfig(
+                host="127.0.0.1",
+                port=11500,
+                model="whisper:base",
+                postprocess_defaults={
+                    "postprocess": True,
+                    "postprocess_model": "qwen3-mlx",
+                    "postprocess_backend": "mlx",
+                    "postprocess_mode": "clean",
+                },
+            ),
+            postprocessor_factory=lambda options: processor,
+        )
+
+    def test_stream_emits_deltas_then_done_with_aggregate(self) -> None:
+        processor = mock.Mock()
+        processor.stream_text = mock.Mock(
+            return_value=iter(["Hello", ", ", "world."])
+        )
+
+        state = self._build_state(processor)
+        request = parse_postprocess_api_request(
+            content_type="application/json",
+            body=b'{"text": "helo world", "stream": true}',
+            default_options=state._postprocess_defaults,
+        )
+
+        events = list(state.stream_postprocess(request))
+
+        # opening frame + 3 deltas + final done frame
+        self.assertEqual(len(events), 5)
+        self.assertFalse(events[0]["done"])
+        self.assertEqual(events[0]["delta"], "")
+        self.assertEqual(events[0]["response"], "")
+        self.assertEqual(events[0]["message"]["content"], "")
+        self.assertEqual([e["delta"] for e in events[1:4]], ["Hello", ", ", "world."])
+        self.assertEqual([e["response"] for e in events[1:4]], ["Hello", ", ", "world."])
+        final = events[-1]
+        self.assertTrue(final["done"])
+        self.assertEqual(final["text"], "Hello, world.")
+        self.assertEqual(final["response"], "Hello, world.")
+        self.assertEqual(final["message"]["content"], "Hello, world.")
+        self.assertEqual(final["raw_text"], "helo world")
+        self.assertTrue(final["postprocess"]["applied"])
+        self.assertNotIn("error", final["postprocess"])
+
+    def test_stream_falls_back_when_processor_lacks_stream_text(self) -> None:
+        processor = mock.Mock(spec=["process_text"])
+        processor.process_text.return_value = "Cleaned output."
+
+        state = self._build_state(processor)
+        request = parse_postprocess_api_request(
+            content_type="application/json",
+            body=b'{"text": "helo world", "stream": true}',
+            default_options=state._postprocess_defaults,
+        )
+
+        events = list(state.stream_postprocess(request))
+
+        # opening + single aggregated delta + done
+        self.assertEqual(len(events), 3)
+        self.assertEqual(events[1]["delta"], "Cleaned output.")
+        self.assertEqual(events[1]["response"], "Cleaned output.")
+        final = events[-1]
+        self.assertTrue(final["done"])
+        self.assertEqual(final["text"], "Cleaned output.")
+
+    def test_stream_surfaces_backend_errors_in_final_event(self) -> None:
+        processor = mock.Mock()
+        processor.stream_text = mock.Mock(side_effect=RuntimeError("boom"))
+
+        state = self._build_state(processor)
+        request = parse_postprocess_api_request(
+            content_type="application/json",
+            body=b'{"text": "helo world", "stream": true}',
+            default_options=state._postprocess_defaults,
+        )
+
+        events = list(state.stream_postprocess(request))
+        final = events[-1]
+
+        self.assertTrue(final["done"])
+        self.assertFalse(final["postprocess"]["applied"])
+        self.assertEqual(final["postprocess"]["error"], "boom")
+        self.assertEqual(final["text"], "helo world")
+
+    def test_stream_request_flag_is_parsed_from_body(self) -> None:
+        request = parse_postprocess_api_request(
+            content_type="application/json",
+            body=b'{"text": "hi", "stream": true}',
+            default_options={"enabled": True, "model": "qwen3-mlx", "backend": "mlx"},
+        )
+        self.assertTrue(request.stream)
+
+        non_stream = parse_postprocess_api_request(
+            content_type="application/json",
+            body=b'{"text": "hi"}',
+            default_options={"enabled": True, "model": "qwen3-mlx", "backend": "mlx"},
+        )
+        self.assertFalse(non_stream.stream)
+
+
+class PreloadStateTests(unittest.TestCase):
+    def test_preload_runs_warmups_in_parallel(self) -> None:
+        state = mock.Mock()
+        gate = threading.Event()
+        started = {"asr": threading.Event(), "post": threading.Event()}
+        overlapped = {"value": False}
+        overlap_lock = threading.Lock()
+
+        def warmup(model: str) -> None:
+            started["asr"].set()
+            if started["post"].is_set():
+                with overlap_lock:
+                    overlapped["value"] = True
+            gate.wait(timeout=1.0)
+
+        def warmup_postprocess() -> dict[str, bool]:
+            started["post"].set()
+            if started["asr"].is_set():
+                with overlap_lock:
+                    overlapped["value"] = True
+            gate.wait(timeout=1.0)
+            return {"warmed": True}
+
+        state.warmup.side_effect = warmup
+        state.warmup_postprocess.side_effect = warmup_postprocess
+
+        runner = threading.Thread(target=_preload_state, args=(state, "whisper:base"))
+        runner.start()
+        self.assertTrue(started["asr"].wait(timeout=1.0))
+        self.assertTrue(started["post"].wait(timeout=1.0))
+        gate.set()
+        runner.join(timeout=1.0)
+
+        self.assertFalse(runner.is_alive())
+        self.assertTrue(overlapped["value"])
 
 
 if __name__ == "__main__":

@@ -255,7 +255,25 @@ class TranscriptionDisplay:
             self.console.print(format_vtt(getattr(result, "segments", [])), end="")
             return
 
+        postprocess = getattr(result, "postprocess", {}) or {}
+        text = str(getattr(result, "text", "")).strip()
         segments = getattr(result, "segments", [])
+        if postprocess.get("applied") and text:
+            start = end = None
+            normalized_segments = _normalize_segments(segments)
+            if normalized_segments:
+                start = normalized_segments[0]["start"]
+                end = normalized_segments[-1]["end"]
+            self.console.print(
+                render_transcript_line(
+                    text,
+                    start=start,
+                    end=end,
+                    show_timestamps=self.show_timestamps,
+                )
+            )
+            return
+
         if segments:
             for segment in _normalize_segments(segments):
                 self.console.print(
