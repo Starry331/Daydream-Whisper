@@ -790,7 +790,7 @@ def listen(
     )
 
 
-@cli.command()
+@cli.command(short_help="Serve a local speech-to-text HTTP API (OpenAI-compatible).")
 @click.option("--model", "-m", default=get_default_model(), show_default=True, help="Default Whisper model for API requests.")
 @click.option("--host", default=get_default_host(), show_default=True, help="Bind address.")
 @click.option("--port", "-p", type=int, default=get_default_port(), show_default=True, help="Port number.")
@@ -933,7 +933,7 @@ def serve(
     )
 
 
-@cli.command()
+@cli.command(short_help="Check environment readiness (Python, MLX, audio, cache).")
 @click.option(
     "--strict/--no-strict",
     default=False,
