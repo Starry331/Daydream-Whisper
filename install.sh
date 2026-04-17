@@ -284,13 +284,18 @@ prompt_text() {
         return 0
     fi
     local response
-    print -n "  ${label} ${DIM}[${LIGHT_BLUE}${default}${RESET}${DIM}]${RESET}: " >&2
+    print "  ${BOLD}${label}${RESET}" >&2
+    print "    ${DIM}Default: ${RESET}${LIGHT_BLUE}${default}${RESET}" >&2
+    print "    ${DIM}Press ${RESET}${BOLD}Enter${RESET}${DIM} to accept, or type a new path then Enter${RESET}" >&2
+    print -n "  ${LIGHT_BLUE}›${RESET} " >&2
     IFS= read -r response || response=""
     if [[ -z "$response" ]]; then
         response="$default"
     fi
     # Expand leading ~ to $HOME for convenience.
     response="${response/#\~/$HOME}"
+    print "  ${GREEN}✓${RESET} ${label} → ${LIGHT_BLUE}${response}${RESET}" >&2
+    print "" >&2
     printf '%s' "$response"
 }
 
@@ -311,7 +316,8 @@ prompt_menu() {
         return 0
     fi
 
-    print "  ${label}" >&2
+    print "  ${BOLD}${label}${RESET}" >&2
+    print "    ${DIM}Use ${RESET}${BOLD}↑/↓${RESET}${DIM} (or j/k, or number key) to navigate, ${RESET}${BOLD}Enter${RESET}${DIM} to confirm${RESET}" >&2
     _hide_cursor
 
     local drew=0 i selection=$default_index
@@ -350,6 +356,57 @@ prompt_menu() {
     _show_cursor
     MENU_CHOICE_INDEX=$selection
     MENU_CHOICE_VALUE="${options[$((selection + 1))]}"
+
+    # Collapse the rendered menu into a single confirmation line so later
+    # prompts don't crowd it.
+    print -n "\033[${count}A" >&2
+    for ((i = 1; i <= count; i++)); do
+        print "\033[K" >&2
+    done
+    print -n "\033[${count}A" >&2
+    print "  ${GREEN}✓${RESET} ${label%% *} → ${LIGHT_BLUE}${MENU_CHOICE_VALUE}${RESET}" >&2
+    print "" >&2
+}
+
+detect_existing_install() {
+    # Print a friendly report of anything we find on disk so the user knows
+    # whether this run will be a fresh install or an update of existing state.
+    local found_any=0
+    local findings=()
+
+    if [[ -d "$INSTALL_DIR/.git" ]]; then
+        findings+=("repo: ${INSTALL_DIR}")
+        found_any=1
+    fi
+    if [[ -x "$INSTALL_DIR/.venv/bin/dwhisper" ]]; then
+        findings+=("venv launcher: ${INSTALL_DIR}/.venv/bin/dwhisper")
+        found_any=1
+    fi
+    if [[ -L "$LAUNCHER_DIR/dwhisper" || -x "$LAUNCHER_DIR/dwhisper" ]]; then
+        findings+=("PATH launcher: ${LAUNCHER_DIR}/dwhisper")
+        found_any=1
+    fi
+    local extra_bin
+    for extra_bin in /opt/homebrew/bin/dwhisper /usr/local/bin/dwhisper; do
+        if [[ -L "$extra_bin" || -x "$extra_bin" ]]; then
+            findings+=("extra launcher: ${extra_bin}")
+            found_any=1
+        fi
+    done
+
+    if (( found_any == 0 )); then
+        print "  ${LIGHT_BLUE}●${RESET} No prior Daydream Whisper install detected — this will be a fresh install."
+        print ""
+        return 0
+    fi
+
+    print "  ${LIGHT_BLUE}●${RESET} ${BOLD}Existing Daydream Whisper install detected${RESET}"
+    local item
+    for item in "${findings[@]}"; do
+        print "    ${DIM}•${RESET} ${item}"
+    done
+    print "    ${DIM}This run will ${RESET}${BOLD}refresh${RESET}${DIM} the install in-place (git pull + pip reinstall).${RESET}"
+    print ""
 }
 
 configure_interactively() {
@@ -418,6 +475,25 @@ configure_interactively() {
         exit 0
     fi
     print ""
+    print "  ${BOLD}${LIGHT_BLUE}▶ Starting installation...${RESET}"
+    print ""
+}
+
+verify_ready() {
+    # Final sanity check: the launcher must actually run. If not, say so
+    # loudly — the user's complaint was that the installer "does nothing
+    # and pops up" at the end.
+    local launcher="$INSTALL_DIR/.venv/bin/dwhisper"
+    if [[ ! -x "$launcher" ]]; then
+        print_fail "Launcher missing at ${launcher}. Installation did NOT complete."
+        exit 1
+    fi
+    local help_line
+    if ! help_line=$("$launcher" --help 2>&1 | head -n 1); then
+        print_fail "Launcher exists but failed to run. Try: ${launcher} --help"
+        exit 1
+    fi
+    print_step "dwhisper launcher verified (${help_line})"
 }
 
 pull_default_model() {
@@ -438,6 +514,7 @@ main() {
     require_command git
     require_command "$PYTHON_CMD"
 
+    detect_existing_install
     configure_interactively
 
     install_brew_package portaudio
@@ -447,14 +524,24 @@ main() {
     verify_install_layout
     install_launcher
     pull_default_model
+    verify_ready
 
     print ""
-    print "  ${BOLD}Next steps${RESET}"
+    print "  ${BOLD}${GREEN}━━━ Installation complete ━━━${RESET}"
     print ""
+    print "  Launcher: ${LIGHT_BLUE}${LAUNCHER_DIR}/dwhisper${RESET}"
+    print "  Repo:     ${LIGHT_BLUE}${INSTALL_DIR}${RESET}"
+    print "  Model:    ${LIGHT_BLUE}${DEFAULT_MODEL}${RESET}"
+    print ""
+    print "  ${BOLD}Try it now${RESET}"
+    print ""
+    print "    dwhisper doctor"
     print "    dwhisper models"
     print "    dwhisper run /path/to/audio.wav"
     print "    dwhisper devices"
     print "    dwhisper listen"
+    print ""
+    print "  ${DIM}If ${RESET}${BOLD}dwhisper${RESET}${DIM} is not found, open a new terminal or run: ${RESET}${BOLD}exec \"\$SHELL\"${RESET}"
     print ""
 }
 
