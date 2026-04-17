@@ -13,16 +13,41 @@ RESET=$'\033[0m'
 GREEN=$'\033[32m'
 YELLOW=$'\033[33m'
 RED=$'\033[31m'
+# Soft sky/ice blue for the banner — uses 256-color 117 with a 16-color
+# fallback (bright cyan) for terminals that don't speak 256-color.
+LIGHT_BLUE=$'\033[38;5;117m'
+LIGHT_BLUE_FALLBACK=$'\033[96m'
 
 print_banner() {
-    print ""
-    print "   ____                  _                                 "
-    print "  |  _ \  __ _ _   _  __| |_ __ ___  __ _ _ __ ___        "
-    print "  | | | |/ _\` | | | |/ _\` | '__/ _ \\/ _\` | '_ \` _ \\       "
-    print "  | |_| | (_| | |_| | (_| | | |  __/ (_| | | | | | |      "
-    print "  |____/ \\__,_|\\__, |\\__,_|_|  \\___|\\__,_|_| |_| |_|      "
-    print "               |___/                  Whisper             "
-    print ""
+    # Pick the 256-color light blue if the terminal advertises 256-color
+    # support, otherwise fall back to the basic bright-cyan ANSI code so
+    # dumb terminals still get a soft, readable tint instead of raw escapes.
+    local banner_color="$LIGHT_BLUE"
+    case "${TERM:-}" in
+        *256color*|xterm-kitty|alacritty|wezterm|screen-256color|tmux-256color) ;;
+        *) banner_color="$LIGHT_BLUE_FALLBACK" ;;
+    esac
+
+    # Quoted heredoc keeps every backslash, apostrophe, and backtick literal
+    # so the ASCII art renders identically regardless of shell interpretation.
+    print -n "$banner_color"
+    cat <<'__DWHISPER_BANNER__'
+
+   ____                  _
+  |  _ \  __ _ _   _  __| |_ __ ___  __ _ _ __ ___
+  | | | |/ _` | | | |/ _` | '__/ _ \/ _` | '_ ` _ \
+  | |_| | (_| | |_| | (_| | | |  __/ (_| | | | | | |
+  |____/ \__,_|\__, |\__,_|_|  \___|\__,_|_| |_| |_|
+               |___/
+   __        ___     _
+   \ \      / / |__ (_)___ _ __   ___ _ __
+    \ \ /\ / /| '_ \| / __| '_ \ / _ \ '__|
+     \ V  V / | | | | \__ \ |_) |  __/ |
+      \_/\_/  |_| |_|_|___/ .__/ \___|_|
+                          |_|
+
+__DWHISPER_BANNER__
+    print -n "$RESET"
 }
 
 print_step() {
@@ -105,19 +130,294 @@ verify_install_layout() {
     fi
 }
 
+persist_launcher_dir_on_path() {
+    # Append an `export PATH` line to the user's shell rc files so new
+    # terminals (and `exec $SHELL`) can find `dwhisper` without any manual
+    # edit. We only touch rc files that already exist or are the canonical
+    # startup file for the user's shell.
+    local export_line="export PATH=\"$LAUNCHER_DIR:\$PATH\""
+    local marker="# Added by Daydream Whisper installer"
+    local touched=0
+    local rc_file
+    local candidate_rcs=()
+
+    case "${SHELL:-}" in
+        *zsh) candidate_rcs=("$HOME/.zshrc" "$HOME/.zprofile") ;;
+        *bash)
+            candidate_rcs=("$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile")
+            ;;
+        *) candidate_rcs=("$HOME/.profile") ;;
+    esac
+
+    for rc_file in "${candidate_rcs[@]}"; do
+        # Skip rc files that don't exist unless it's the first entry (which we
+        # treat as the canonical file to create for this shell).
+        if [[ ! -f "$rc_file" && "$rc_file" != "${candidate_rcs[1]}" ]]; then
+            continue
+        fi
+        if [[ -f "$rc_file" ]] && grep -Fq "$LAUNCHER_DIR" "$rc_file" 2>/dev/null; then
+            continue
+        fi
+        {
+            print ""
+            print "$marker"
+            print "$export_line"
+        } >> "$rc_file"
+        print_step "Added $LAUNCHER_DIR to PATH in $(basename "$rc_file")"
+        touched=1
+    done
+
+    if (( touched == 0 )); then
+        print_warn "Could not update a shell rc file automatically."
+        print "    Add this line manually:"
+        print "      $export_line"
+    else
+        print "    ${DIM}Open a new terminal, or run: exec \"\$SHELL\"${RESET}"
+    fi
+}
+
 install_launcher() {
     mkdir -p "$LAUNCHER_DIR"
     ln -sf "$INSTALL_DIR/.venv/bin/dwhisper" "$LAUNCHER_DIR/dwhisper"
     print_step "Installed launcher at ${LAUNCHER_DIR}/dwhisper"
 
+    # Best-effort: if a user-writable Homebrew bin sits on PATH already, drop
+    # a second symlink there so `dwhisper` works in the CURRENT shell without
+    # any rc-file reload.
+    local homebrew_bin
+    for homebrew_bin in /opt/homebrew/bin /usr/local/bin; do
+        if [[ -d "$homebrew_bin" && -w "$homebrew_bin" ]]; then
+            ln -sf "$INSTALL_DIR/.venv/bin/dwhisper" "$homebrew_bin/dwhisper" 2>/dev/null || continue
+            print_step "Also linked ${homebrew_bin}/dwhisper (already on PATH)"
+            break
+        fi
+    done
+
     case ":$PATH:" in
-        *":$LAUNCHER_DIR:"*) ;;
+        *":$LAUNCHER_DIR:"*)
+            print_step "${LAUNCHER_DIR} already on PATH"
+            ;;
         *)
-            print_warn "${LAUNCHER_DIR} is not in PATH for the current shell."
-            print "    Add this to your shell profile:"
-            print "    export PATH=\"$LAUNCHER_DIR:\$PATH\""
+            persist_launcher_dir_on_path
             ;;
     esac
+}
+
+# -----------------------------------------------------------------------------
+# Interactive prompts (arrow-key aware, safe for piped `curl | sh` installs).
+# All helpers no-op to defaults when stdin or stdout is not a TTY.
+# -----------------------------------------------------------------------------
+
+HAS_TTY=0
+if [[ -t 0 && -t 1 ]]; then
+    HAS_TTY=1
+fi
+
+# Exported by prompt_menu so callers don't have to parse command substitution.
+MENU_CHOICE_VALUE=""
+MENU_CHOICE_INDEX=0
+
+_read_key() {
+    # Read a single keystroke, including CSI escape sequences like arrows.
+    local key rest
+    IFS= read -rsk1 key 2>/dev/null || return 1
+    if [[ "$key" == $'\e' ]]; then
+        IFS= read -rsk2 -t 0.01 rest 2>/dev/null || rest=""
+        key+="$rest"
+    fi
+    printf '%s' "$key"
+}
+
+_hide_cursor() { print -n $'\033[?25l' >&2; }
+_show_cursor() { print -n $'\033[?25h' >&2; }
+
+prompt_yes_no() {
+    # Usage: prompt_yes_no "question" <default_yes:0|1>
+    # Returns 0 for Yes, 1 for No. Arrow keys / h / l / y / n toggle; Enter confirms.
+    local question="$1"
+    local selection=${2:-1}
+
+    if (( HAS_TTY == 0 )) || [[ -n "${DWHISPER_YES:-}" ]]; then
+        (( selection )) && return 0 || return 1
+    fi
+
+    _hide_cursor
+    local drew=0
+    while true; do
+        if (( drew )); then
+            print -n $'\r\033[K' >&2
+        fi
+        drew=1
+        local yes_label no_label
+        if (( selection )); then
+            yes_label="${BOLD}${LIGHT_BLUE}[ Yes ]${RESET}"
+            no_label="${DIM}  No  ${RESET}"
+        else
+            yes_label="${DIM} Yes  ${RESET}"
+            no_label="${BOLD}${LIGHT_BLUE}[ No ]${RESET}"
+        fi
+        print -n "  ${question}  ${yes_label}  ${no_label}  ${DIM}(←/→ Enter)${RESET}" >&2
+
+        local key
+        key=$(_read_key) || { selection=0; break; }
+        case "$key" in
+            $'\e[D'|$'\e[A'|'h'|'k') selection=1 ;;
+            $'\e[C'|$'\e[B'|'l'|'j') selection=0 ;;
+            'y'|'Y') selection=1; break ;;
+            'n'|'N') selection=0; break ;;
+            $'\n'|$'\r'|'') break ;;
+            $'\x03'|$'\x04') selection=0; break ;;
+        esac
+    done
+    print "" >&2
+    _show_cursor
+    (( selection ))
+}
+
+prompt_text() {
+    # Usage: prompt_text "label" "default"
+    # Echoes the chosen string on stdout. Empty input accepts the default.
+    local label="$1"
+    local default="$2"
+    if (( HAS_TTY == 0 )) || [[ -n "${DWHISPER_YES:-}" ]]; then
+        printf '%s' "$default"
+        return 0
+    fi
+    local response
+    print -n "  ${label} ${DIM}[${LIGHT_BLUE}${default}${RESET}${DIM}]${RESET}: " >&2
+    IFS= read -r response || response=""
+    if [[ -z "$response" ]]; then
+        response="$default"
+    fi
+    # Expand leading ~ to $HOME for convenience.
+    response="${response/#\~/$HOME}"
+    printf '%s' "$response"
+}
+
+prompt_menu() {
+    # Usage: prompt_menu "label" <default_index> option1 option2 ...
+    # Writes the chosen option text to $MENU_CHOICE_VALUE and the index to
+    # $MENU_CHOICE_INDEX. Arrow keys / j / k navigate; Enter confirms.
+    local label="$1"
+    local default_index=$2
+    shift 2
+    local options=("$@")
+    local count=${#options[@]}
+
+    MENU_CHOICE_INDEX=$default_index
+    MENU_CHOICE_VALUE="${options[$((default_index + 1))]}"
+
+    if (( HAS_TTY == 0 )) || [[ -n "${DWHISPER_YES:-}" ]]; then
+        return 0
+    fi
+
+    print "  ${label}" >&2
+    _hide_cursor
+
+    local drew=0 i selection=$default_index
+    while true; do
+        if (( drew )); then
+            # Move cursor up by count lines to overwrite previous render.
+            print -n "\033[${count}A" >&2
+        fi
+        drew=1
+        for ((i = 1; i <= count; i++)); do
+            print -n $'\r\033[K' >&2
+            if (( i - 1 == selection )); then
+                print "    ${BOLD}${LIGHT_BLUE}▶${RESET} ${LIGHT_BLUE}${options[$i]}${RESET}" >&2
+            else
+                print "      ${DIM}${options[$i]}${RESET}" >&2
+            fi
+        done
+
+        local key
+        key=$(_read_key) || break
+        case "$key" in
+            $'\e[A'|'k') (( selection = (selection - 1 + count) % count )) ;;
+            $'\e[B'|'j') (( selection = (selection + 1) % count )) ;;
+            $'\n'|$'\r'|'') break ;;
+            $'\x03'|$'\x04') break ;;
+            [1-9])
+                # Number-key shortcut.
+                local n=$((key))
+                if (( n >= 1 && n <= count )); then
+                    selection=$((n - 1))
+                    break
+                fi
+                ;;
+        esac
+    done
+    _show_cursor
+    MENU_CHOICE_INDEX=$selection
+    MENU_CHOICE_VALUE="${options[$((selection + 1))]}"
+}
+
+configure_interactively() {
+    # Only prompt for values the user didn't already pin via env vars.
+    local install_dir_locked=0 launcher_locked=0 model_locked=0
+    [[ -n "${DWHISPER_INSTALL_DIR:-${DAYDREAM_INSTALL_DIR:-}}" ]] && install_dir_locked=1
+    [[ -n "${DWHISPER_LAUNCHER_DIR:-${DAYDREAM_LAUNCHER_DIR:-}}" ]] && launcher_locked=1
+    [[ -n "${DWHISPER_DEFAULT_MODEL:-${DAYDREAM_DEFAULT_MODEL:-}}" ]] && model_locked=1
+
+    if (( HAS_TTY == 0 )) || [[ -n "${DWHISPER_YES:-}" ]]; then
+        print_step "Non-interactive mode — using defaults."
+        print "    ${DIM}install dir : ${INSTALL_DIR}${RESET}"
+        print "    ${DIM}launcher dir: ${LAUNCHER_DIR}${RESET}"
+        print "    ${DIM}default model: ${DEFAULT_MODEL}${RESET}"
+        return 0
+    fi
+
+    print "  ${BOLD}Review installation settings${RESET}"
+    print ""
+
+    if (( ! install_dir_locked )); then
+        INSTALL_DIR=$(prompt_text "Install directory" "$INSTALL_DIR")
+    else
+        print "  Install directory ${DIM}(pinned via env)${RESET}: ${LIGHT_BLUE}${INSTALL_DIR}${RESET}"
+    fi
+
+    if (( ! launcher_locked )); then
+        LAUNCHER_DIR=$(prompt_text "Launcher directory" "$LAUNCHER_DIR")
+    else
+        print "  Launcher directory ${DIM}(pinned via env)${RESET}: ${LIGHT_BLUE}${LAUNCHER_DIR}${RESET}"
+    fi
+
+    if (( ! model_locked )); then
+        local model_options=(
+            "whisper:tiny"
+            "whisper:base"
+            "whisper:small"
+            "whisper:medium"
+            "whisper:large-v3-turbo"
+        )
+        # Default to current DEFAULT_MODEL if it's in the list, otherwise "base".
+        local default_index=1
+        local idx=0 opt
+        for opt in "${model_options[@]}"; do
+            if [[ "$opt" == "$DEFAULT_MODEL" ]]; then
+                default_index=$idx
+                break
+            fi
+            (( idx++ ))
+        done
+        prompt_menu "Default speech model ${DIM}(Enter to accept)${RESET}" "$default_index" "${model_options[@]}"
+        DEFAULT_MODEL="$MENU_CHOICE_VALUE"
+    else
+        print "  Default model ${DIM}(pinned via env)${RESET}: ${LIGHT_BLUE}${DEFAULT_MODEL}${RESET}"
+    fi
+
+    print ""
+    print "  ${BOLD}Summary${RESET}"
+    print "    install dir  : ${LIGHT_BLUE}${INSTALL_DIR}${RESET}"
+    print "    launcher dir : ${LIGHT_BLUE}${LAUNCHER_DIR}${RESET}"
+    print "    default model: ${LIGHT_BLUE}${DEFAULT_MODEL}${RESET}"
+    print ""
+
+    if ! prompt_yes_no "Proceed with installation?" 1; then
+        print_warn "Installation cancelled by user."
+        exit 0
+    fi
+    print ""
 }
 
 pull_default_model() {
@@ -137,6 +437,8 @@ main() {
 
     require_command git
     require_command "$PYTHON_CMD"
+
+    configure_interactively
 
     install_brew_package portaudio
     install_brew_package ffmpeg
