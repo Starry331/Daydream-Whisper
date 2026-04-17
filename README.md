@@ -747,7 +747,94 @@ Meeting notes route: /text/meeting-notes
 
 If the app only asks for Base URL and API Key, that is usually enough and the server-side default model will be used. If you changed the port, update the Base URL to match.
 
-### 7. Production-oriented serving
+### 7. Qwen3 example backend: Qwen3-ASR-1.7B-4bit + Qwen3-4B-4bit
+
+If you specifically want a Qwen-style backend example, the current support boundary matters:
+
+- `dwhisper` still uses Whisper as the first-stage ASR engine on `transcribe`, `listen`, and `/v1/audio/*`
+- `Qwen3-4B-4bit` fits naturally as the second-stage post-process backend
+- `Qwen3-ASR-1.7B-4bit` is not a drop-in replacement for the built-in Whisper ASR path today
+
+Supported `dwhisper` setup:
+
+1. Keep Whisper for speech recognition.
+2. Use `Qwen3-4B-4bit` as the post-process model.
+3. Expose `dwhisper serve` to apps like 闪电说.
+
+Example config with an in-process MLX backend:
+
+```yaml
+model: whisper:large-v3-turbo
+
+postprocess:
+  enabled: true
+  model: Qwen/Qwen3-4B-4bit
+  backend: mlx
+  mode: clean
+  timeout: 60
+
+serve:
+  host: 127.0.0.1
+  port: 11500
+  preload: true
+```
+
+You will also need `mlx-lm` for the local MLX text backend:
+
+```bash
+pip install mlx-lm
+```
+
+Replace `Qwen/Qwen3-4B-4bit` with the exact MLX model ID or local path you actually installed.
+
+Equivalent one-shot serve command:
+
+```bash
+dwhisper serve \
+  --model whisper:large-v3-turbo \
+  --preload \
+  --post-backend mlx \
+  --post-model Qwen/Qwen3-4B-4bit \
+  --post-mode clean
+```
+
+If you already expose `Qwen3-4B-4bit` through an OpenAI-compatible HTTP service, use `postprocess.backend: http` plus `postprocess.base_url`, or the CLI equivalent:
+
+```bash
+dwhisper serve \
+  --model whisper:large-v3-turbo \
+  --preload \
+  --post-backend http \
+  --post-model Qwen3-4B-4bit \
+  --post-url http://127.0.0.1:11435/v1 \
+  --post-mode clean
+```
+
+What this gives you:
+
+- Whisper handles speech recognition
+- `Qwen3-4B-4bit` can clean transcript text with `/v1/text/clean`
+- it can summarize transcripts with `/v1/text/summary`
+- it can turn transcripts into notes with `/v1/text/meeting-notes`
+- it can normalize speaker labels with `/v1/text/speakers`
+- long text routes can stream over SSE with `"stream": true`
+
+If you already run an external stack where `Qwen3-ASR-1.7B-4bit` performs speech recognition and `Qwen3-4B-4bit` performs rewrite/summary, treat that as a separate OpenAI-compatible service. `dwhisper` itself does not currently swap its `/v1/audio/*` speech backend from Whisper to Qwen3-ASR.
+
+For apps like [闪电说](https://shandianshuo.cn), the practical `dwhisper` values are still:
+
+```text
+Base URL: http://127.0.0.1:11500/v1
+API Key: dwhisper-local
+Model: whisper:large-v3-turbo
+```
+
+That means:
+
+- speech input still goes through Whisper
+- text cleanup / summary / meeting notes can go through `Qwen3-4B-4bit`
+
+### 8. Production-oriented serving
 
 Useful serving flags:
 
@@ -1568,7 +1655,94 @@ Model: whisper:large-v3-turbo
 
 如果 app 只要求填 Base URL 和 API Key，通常这样就够了，模型会走服务端默认值。你如果改了端口，就把这里的 Base URL 一并改掉。
 
-### 7. 面向集成的服务端参数
+### 7. Qwen3 组合示例：Qwen3-ASR-1.7B-4bit + Qwen3-4B-4bit
+
+如果你想在 README 里看到一个更具体的 Qwen 组合示例，先要明确当前支持边界：
+
+- `dwhisper` 自己的 `transcribe`、`listen`、`/v1/audio/*` 第一阶段 ASR 仍然固定是 Whisper
+- `Qwen3-4B-4bit` 很适合作为第二阶段后处理后端
+- `Qwen3-ASR-1.7B-4bit` 目前不能直接替换 `dwhisper` 内建的 Whisper 主识别链路
+
+当前 `dwhisper` 里真正可落地的配置方式是：
+
+1. 语音识别继续用 Whisper
+2. 文本后处理改成 `Qwen3-4B-4bit`
+3. 再把 `dwhisper serve` 暴露给闪电说这类 app
+
+用本地 MLX 后端的配置示例：
+
+```yaml
+model: whisper:large-v3-turbo
+
+postprocess:
+  enabled: true
+  model: Qwen/Qwen3-4B-4bit
+  backend: mlx
+  mode: clean
+  timeout: 60
+
+serve:
+  host: 127.0.0.1
+  port: 11500
+  preload: true
+```
+
+这个本地 MLX 文本后端还需要先安装 `mlx-lm`：
+
+```bash
+pip install mlx-lm
+```
+
+把 `Qwen/Qwen3-4B-4bit` 换成你实际安装的 MLX 模型 ID 或本地模型路径即可。
+
+等价的一次性启动命令：
+
+```bash
+dwhisper serve \
+  --model whisper:large-v3-turbo \
+  --preload \
+  --post-backend mlx \
+  --post-model Qwen/Qwen3-4B-4bit \
+  --post-mode clean
+```
+
+如果你本来就是通过 OpenAI 兼容 HTTP 服务暴露 `Qwen3-4B-4bit`，那就把 `postprocess.backend` 改成 `http`，再加上 `postprocess.base_url`；对应 CLI 写法例如：
+
+```bash
+dwhisper serve \
+  --model whisper:large-v3-turbo \
+  --preload \
+  --post-backend http \
+  --post-model Qwen3-4B-4bit \
+  --post-url http://127.0.0.1:11435/v1 \
+  --post-mode clean
+```
+
+这套配置能提供的能力：
+
+- Whisper 负责语音转文字
+- `Qwen3-4B-4bit` 可以处理 `/v1/text/clean` 做文本清洗
+- 可以处理 `/v1/text/summary` 做摘要
+- 可以处理 `/v1/text/meeting-notes` 做会议纪要整理
+- 可以处理 `/v1/text/speakers` 做说话人格式整理
+- 长文本场景可以对 `/v1/text/*` 加 `"stream": true` 走 SSE 流式返回
+
+如果你已经在外部单独运行了一套 `Qwen3-ASR-1.7B-4bit` 负责语音识别、`Qwen3-4B-4bit` 负责摘要/改写的服务，那应该把它视为另一套独立的 OpenAI 兼容服务。`dwhisper` 当前不会把自己的 `/v1/audio/*` 语音后端从 Whisper 切换成 Qwen3-ASR。
+
+对于 [闪电说](https://shandianshuo.cn) 这类 app，当前在 `dwhisper` 这边的实际填写仍然建议是：
+
+```text
+Base URL: http://127.0.0.1:11500/v1
+API Key: dwhisper-local
+Model: whisper:large-v3-turbo
+```
+
+这意味着：
+
+- 语音输入仍然走 Whisper
+- 文字清洗、摘要、纪要整理可以走 `Qwen3-4B-4bit`
+
+### 8. 面向集成的服务端参数
 
 建议重点关注：
 
