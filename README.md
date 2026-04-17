@@ -666,7 +666,88 @@ Daydream Whisper accepts:
 
 This means you can point `dwhisper` at either a plain Whisper directory or a larger local app bundle that contains a speech submodel.
 
-### 6. Production-oriented serving
+### 6. End-to-end example: pull from Hugging Face, use locally, then connect 闪电说
+
+This is a practical start-to-finish flow for a Hugging Face Whisper checkpoint.
+
+1. Pull a Whisper model from Hugging Face.
+
+```bash
+dwhisper pull mlx-community/whisper-large-v3-turbo
+```
+
+The built-in shortcut for the same checkpoint is:
+
+```bash
+dwhisper pull whisper:large-v3-turbo
+```
+
+If Hugging Face rate-limits you, export `HF_TOKEN` first and retry.
+
+2. Confirm the model is available locally.
+
+```bash
+dwhisper show whisper:large-v3-turbo
+dwhisper list
+```
+
+3. Make it the local default in `~/.dwhisper/config.yaml`.
+
+```yaml
+model: whisper:large-v3-turbo
+
+serve:
+  host: 127.0.0.1
+  port: 11500
+  preload: true
+```
+
+For built-in checkpoints, the built-in alias and the full Hugging Face repo ID are interchangeable.
+
+4. Use it locally from the CLI.
+
+```bash
+dwhisper transcribe ./meeting.wav
+dwhisper listen
+```
+
+If you do not want to set a global default, keep your config unchanged and pass the model explicitly:
+
+```bash
+dwhisper transcribe ./meeting.wav --model whisper:large-v3-turbo
+```
+
+5. Start the local API.
+
+```bash
+dwhisper serve --model whisper:large-v3-turbo --preload
+```
+
+Quick verification:
+
+```bash
+curl http://127.0.0.1:11500/health
+curl http://127.0.0.1:11500/v1/models
+```
+
+6. Connect [闪电说](https://shandianshuo.cn) or another OpenAI-compatible app.
+
+Use these values:
+
+```text
+Base URL: http://127.0.0.1:11500/v1
+API Key: dwhisper-local
+Model: whisper:large-v3-turbo
+Speech-to-text route: /audio/transcriptions
+Translation route: /audio/translations
+Text cleanup route: /text/clean
+Summary route: /text/summary
+Meeting notes route: /text/meeting-notes
+```
+
+If the app only asks for Base URL and API Key, that is usually enough and the server-side default model will be used. If you changed the port, update the Base URL to match.
+
+### 7. Production-oriented serving
 
 Useful serving flags:
 
@@ -1406,7 +1487,88 @@ dwhisper serve \
 
 这意味着你既可以给它一个纯 Whisper 模型目录，也可以给它一个更大的本地应用包，只要包里嵌着 Whisper 语音子模型。
 
-### 6. 面向集成的服务端参数
+### 6. 实操示例：从 Hugging Face 拉模型，到本地使用，再到接入闪电说
+
+下面是一条完整可落地的路径：先从 Hugging Face 拉 Whisper 模型，再把它设成你本地默认模型，最后接到闪电说这类 OpenAI 兼容 app 上。
+
+1. 先从 Hugging Face 拉一个 Whisper 模型。
+
+```bash
+dwhisper pull mlx-community/whisper-large-v3-turbo
+```
+
+同一个模型也可以直接用内置别名：
+
+```bash
+dwhisper pull whisper:large-v3-turbo
+```
+
+如果你遇到 Hugging Face 限流，先设置 `HF_TOKEN` 再重试。
+
+2. 确认模型已经在本地可用。
+
+```bash
+dwhisper show whisper:large-v3-turbo
+dwhisper list
+```
+
+3. 把它写进 `~/.dwhisper/config.yaml`，作为本地默认模型。
+
+```yaml
+model: whisper:large-v3-turbo
+
+serve:
+  host: 127.0.0.1
+  port: 11500
+  preload: true
+```
+
+对于内置检查点，内置别名和完整 Hugging Face repo ID 是等价可互换的。
+
+4. 在本地 CLI 里直接使用。
+
+```bash
+dwhisper transcribe ./meeting.wav
+dwhisper listen
+```
+
+如果你不想改全局默认值，也可以直接显式传模型：
+
+```bash
+dwhisper transcribe ./meeting.wav --model whisper:large-v3-turbo
+```
+
+5. 启动本地 API 服务。
+
+```bash
+dwhisper serve --model whisper:large-v3-turbo --preload
+```
+
+先简单自测一下：
+
+```bash
+curl http://127.0.0.1:11500/health
+curl http://127.0.0.1:11500/v1/models
+```
+
+6. 接入 [闪电说](https://shandianshuo.cn) 或其他 OpenAI 兼容 app。
+
+可以按下面填写：
+
+```text
+Base URL: http://127.0.0.1:11500/v1
+API Key: dwhisper-local
+Model: whisper:large-v3-turbo
+语音转写路由: /audio/transcriptions
+翻译路由: /audio/translations
+文本纠错路由: /text/clean
+摘要路由: /text/summary
+会议纪要路由: /text/meeting-notes
+```
+
+如果 app 只要求填 Base URL 和 API Key，通常这样就够了，模型会走服务端默认值。你如果改了端口，就把这里的 Base URL 一并改掉。
+
+### 7. 面向集成的服务端参数
 
 建议重点关注：
 
