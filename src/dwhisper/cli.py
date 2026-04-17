@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import functools
 from pathlib import Path
 
@@ -984,4 +985,9 @@ def doctor(strict: bool) -> None:
         raise SystemExit(1)
 
 
-cli.add_command(transcribe, name="run")
+# ``run`` is a legacy alias of ``transcribe``. We register it as a hidden
+# command so existing scripts keep working, but it no longer clutters the
+# top-level ``--help`` listing.
+_run_alias = copy.copy(transcribe)
+_run_alias.hidden = True
+cli.add_command(_run_alias, name="run")

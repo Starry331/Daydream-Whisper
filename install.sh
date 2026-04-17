@@ -537,7 +537,7 @@ main() {
     print ""
     print "    dwhisper doctor"
     print "    dwhisper models"
-    print "    dwhisper run /path/to/audio.wav"
+    print "    dwhisper transcribe /path/to/audio.wav"
     print "    dwhisper devices"
     print "    dwhisper listen"
     print ""
