@@ -419,7 +419,7 @@ API key:
 
 Examples:
 
-- [闪电说](https://shandianshuo.cn) or another OpenAI-compatible third-party app will usually want `http://127.0.0.1:11500/v1` as the Base URL
+- (https://shandianshuo.cn) or another OpenAI-compatible third-party app will usually want `http://127.0.0.1:11500/v1` as the Base URL
 - an app that sends speech should call `POST /v1/audio/transcriptions`
 - an app that already has plain text and wants rewriting should call `POST /v1/text/postprocess`
 - an app that wants streaming summaries should call `POST /v1/text/summary` with `"stream": true`
@@ -666,7 +666,7 @@ Daydream Whisper accepts:
 
 This means you can point `dwhisper` at either a plain Whisper directory or a larger local app bundle that contains a speech submodel.
 
-### 6. End-to-end example: pull from Hugging Face, use locally, then connect 闪电说
+### 6. End-to-end example: pull from Hugging Face, use locally, then connect shandianshuo
 
 This is a practical start-to-finish flow for a Hugging Face Whisper checkpoint.
 
@@ -730,7 +730,7 @@ curl http://127.0.0.1:11500/health
 curl http://127.0.0.1:11500/v1/models
 ```
 
-6. Connect [闪电说](https://shandianshuo.cn) or another OpenAI-compatible app.
+6. Connect (https://shandianshuo.cn) or another OpenAI-compatible app.
 
 Use these values:
 
@@ -759,7 +759,7 @@ Supported `dwhisper` setup:
 
 1. Keep Whisper for speech recognition.
 2. Use `Qwen3-4B-4bit` as the post-process model.
-3. Expose `dwhisper serve` to apps like 闪电说.
+3. Expose `dwhisper serve` to apps like shandianshuo.
 
 Example config with an in-process MLX backend:
 
@@ -821,7 +821,7 @@ What this gives you:
 
 If you already run an external stack where `Qwen3-ASR-1.7B-4bit` performs speech recognition and `Qwen3-4B-4bit` performs rewrite/summary, treat that as a separate OpenAI-compatible service. `dwhisper` itself does not currently swap its `/v1/audio/*` speech backend from Whisper to Qwen3-ASR.
 
-For apps like [闪电说](https://shandianshuo.cn), the practical `dwhisper` values are still:
+For apps like (https://shandianshuo.cn), the practical `dwhisper` values are still:
 
 ```text
 Base URL: http://127.0.0.1:11500/v1
@@ -1325,7 +1325,7 @@ API Key：
 
 常见接法：
 
-- [闪电说](https://shandianshuo.cn) 或其他 OpenAI 兼容第三方 app，通常把 Base URL 填成 `http://127.0.0.1:11500/v1`
+- 例如：(https://shandianshuo.cn) 或其他 OpenAI 兼容第三方 app，通常把 Base URL 填成 `http://127.0.0.1:11500/v1`
 - 如果应用要直接上传语音做转写，调用 `POST /v1/audio/transcriptions`
 - 如果应用已经自己拿到了文字，只想做清洗、改写或摘要，调用 `POST /v1/text/postprocess`
 - 如果应用支持边生成边显示摘要，调用 `POST /v1/text/summary`，并加 `"stream": true`
@@ -1729,7 +1729,7 @@ dwhisper serve \
 
 如果你已经在外部单独运行了一套 `Qwen3-ASR-1.7B-4bit` 负责语音识别、`Qwen3-4B-4bit` 负责摘要/改写的服务，那应该把它视为另一套独立的 OpenAI 兼容服务。`dwhisper` 当前不会把自己的 `/v1/audio/*` 语音后端从 Whisper 切换成 Qwen3-ASR。
 
-对于 [闪电说](https://shandianshuo.cn) 这类 app，当前在 `dwhisper` 这边的实际填写仍然建议是：
+对于 (https://shandianshuo.cn) 这类 app，当前在 `dwhisper` 这边的实际填写仍然建议是：
 
 ```text
 Base URL: http://127.0.0.1:11500/v1
