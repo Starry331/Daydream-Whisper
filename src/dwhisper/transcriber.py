@@ -697,7 +697,168 @@ def transcribe_file(
     model: str,
     options: TranscribeOptions | None = None,
 ) -> TranscribeResult:
-    return WhisperTranscriber(model).transcribe_file(audio_path, options=options)
+    return build_transcriber(model).transcribe_file(audio_path, options=options)
+
+
+# ---------------------------------------------------------------------------
+# mlx-audio backend (Qwen3-ASR, Parakeet, SenseVoice, …)
+#
+# Unlike mlx-whisper, the ``mlx-audio`` package exposes a simple synchronous
+# ``generate_transcription`` call that runs in-process. No subprocess worker
+# is needed — MLX metal crashes that plague the old Whisper runtime are not
+# an issue here, so the implementation is intentionally minimal.
+# ---------------------------------------------------------------------------
+
+
+def _load_mlx_audio_api() -> tuple[Callable[..., Any], Callable[..., Any]]:
+    """Return ``(load_model, generate_transcription)`` from mlx-audio.
+
+    Raises a clear ``RuntimeError`` if the package isn't installed so users
+    know exactly what to ``pip install``.
+    """
+    try:
+        from mlx_audio.stt.generate import generate_transcription
+        from mlx_audio.stt.utils import load_model
+    except ImportError as exc:  # pragma: no cover - env-dependent
+        raise RuntimeError(
+            "mlx-audio is not installed. Install it to use non-Whisper ASR "
+            "models (Qwen3-ASR, Parakeet, SenseVoice, …): pip install mlx-audio"
+        ) from exc
+    return load_model, generate_transcription
+
+
+@dataclass(slots=True)
+class MlxAudioTranscriber:
+    """Transcriber for mlx-audio models (Qwen3-ASR and friends)."""
+
+    model: str
+    model_path: Path = field(init=False)
+    _model: Any = field(init=False, default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        # ``load_whisper_model`` name is historical — under the hood it just
+        # resolves + validates any ASR model path, backend-agnostic.
+        self.model_path = load_whisper_model(self.model)
+
+    def _ensure_loaded(self) -> None:
+        if self._model is not None:
+            return
+        load_model, _ = _load_mlx_audio_api()
+        self._model = load_model(str(self.model_path))
+
+    def _coerce_stt_output(
+        self,
+        stt: Any,
+        *,
+        started_at: float,
+        source: str | None,
+        fallback_language: str | None,
+    ) -> TranscribeResult:
+        raw_segments = getattr(stt, "segments", None) or []
+        segments: list[dict[str, Any]] = []
+        for seg in raw_segments:
+            if not isinstance(seg, dict):
+                continue
+            segments.append(
+                {
+                    "text": str(seg.get("text", "")),
+                    "start": float(seg.get("start", 0.0) or 0.0),
+                    "end": float(seg.get("end", 0.0) or 0.0),
+                }
+            )
+        duration = 0.0
+        if segments:
+            duration = max(float(s.get("end", 0.0) or 0.0) for s in segments)
+        return TranscribeResult(
+            text=str(getattr(stt, "text", "") or "").strip(),
+            segments=segments,
+            language=getattr(stt, "language", None) or fallback_language,
+            duration=duration,
+            processing_time=max(0.0, time.perf_counter() - started_at),
+            source=source,
+        )
+
+    def transcribe_file(
+        self,
+        path: str | Path,
+        *,
+        options: TranscribeOptions | None = None,
+    ) -> TranscribeResult:
+        options = options or TranscribeOptions()
+        # mlx-audio does not consume ``initial_prompt`` the way Whisper does,
+        # so we don't bias the prompt here. The corrector is still applied to
+        # the resulting text below.
+        corrector = options.build_corrector()
+        postprocessor = options.build_postprocessor()
+
+        audio_path = Path(path).expanduser()
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+        self._ensure_loaded()
+        _, generate_transcription = _load_mlx_audio_api()
+
+        started_at = time.perf_counter()
+        stt = generate_transcription(
+            model=self._model,
+            audio=str(audio_path),
+            format="txt",
+            verbose=options.verbose,
+        )
+
+        result = self._coerce_stt_output(
+            stt,
+            started_at=started_at,
+            source=str(audio_path),
+            fallback_language=options.language,
+        )
+        if corrector is not None:
+            corrector.apply(result)
+        if postprocessor is not None:
+            _safe_apply_postprocessor(postprocessor, result)
+        return result
+
+    def transcribe_samples(
+        self,
+        audio: np.ndarray,
+        *,
+        sample_rate: int = 16000,
+        options: TranscribeOptions | None = None,
+    ) -> TranscribeResult:
+        options = options or TranscribeOptions()
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
+            temp_path = Path(handle.name)
+        try:
+            write_wav_file(temp_path, np.asarray(audio, dtype=np.float32), sample_rate=sample_rate)
+            result = self.transcribe_file(temp_path, options=options)
+            result.source = "live-audio"
+            return result
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    def close(self) -> None:
+        """Release the loaded model reference.
+
+        mlx-audio runs entirely in-process (no worker subprocess to reap), so
+        this is effectively a no-op besides dropping the model handle to let
+        GC reclaim weights.
+        """
+        self._model = None
+
+
+def build_transcriber(model: str) -> "WhisperTranscriber | MlxAudioTranscriber":
+    """Dispatch to the right transcriber class based on the model's backend.
+
+    Uses :func:`dwhisper.registry.detect_backend` — the mlx-whisper path is
+    returned for every Whisper family (the historical behavior) and the
+    mlx-audio path for Qwen3-ASR / Parakeet / SenseVoice / anything else
+    flagged in the registry.
+    """
+    from dwhisper.registry import BACKEND_MLX_AUDIO, detect_backend
+
+    if detect_backend(model) == BACKEND_MLX_AUDIO:
+        return MlxAudioTranscriber(model)
+    return WhisperTranscriber(model)
 
 
 def _safe_apply_postprocessor(postprocessor: Any, result: TranscribeResult) -> None:

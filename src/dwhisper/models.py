@@ -173,6 +173,8 @@ def reject_gguf_reference(value: str) -> None:
 
 
 def validate_runtime_model(target: str, *, source_name: str | None = None) -> Path:
+    from dwhisper.registry import BACKEND_MLX_AUDIO, detect_backend
+
     model_path = _maybe_local_model_path(target)
     if model_path is None:
         model_path = _get_model_path(target)
@@ -182,12 +184,32 @@ def validate_runtime_model(target: str, *, source_name: str | None = None) -> Pa
         raise ValueError(f"Model '{label}' is not available locally.")
 
     if not is_local_model_dir(model_path):
-        raise ValueError(f"Model '{label}' is not a valid local Whisper MLX directory.")
+        raise ValueError(f"Model '{label}' is not a valid local ASR model directory.")
 
     config = _read_json(model_path / "config.json")
     if config.get("daydream_fixture"):
         return model_path
 
+    # Validation paths diverge by backend: Whisper checkpoints ship very
+    # specific config keys (mel bins, audio dim) while mlx-audio models
+    # (Qwen3-ASR, Parakeet, SenseVoice…) use standard LLM-style configs.
+    backend = detect_backend(source_name or target)
+
+    if not (
+        (model_path / "weights.npz").exists()
+        or (model_path / "model.safetensors.index.json").exists()
+        or any(model_path.glob("*.safetensors"))
+    ):
+        raise ValueError(f"Model '{label}' is missing MLX weights.")
+
+    if backend == BACKEND_MLX_AUDIO:
+        # mlx-audio loads by pointing ``load_model`` at the directory; anything
+        # beyond "config.json + weights present" will be surfaced by the
+        # backend at load time with a more specific error.
+        return model_path
+
+    # mlx-whisper: keep the original strict checks so typos / mis-pulled
+    # (non-Whisper) models fail fast before the subprocess worker is spawned.
     model_type = str(config.get("model_type", "")).lower()
     if "whisper" not in model_type:
         raise ValueError(f"Model '{label}' is not a Whisper checkpoint.")
@@ -196,13 +218,6 @@ def validate_runtime_model(target: str, *, source_name: str | None = None) -> Pa
     has_mel_info = any(key in config for key in ("num_mel_bins", "n_mels"))
     if not has_dimension or not has_mel_info:
         raise ValueError(f"Model '{label}' is missing Whisper configuration fields.")
-
-    if not (
-        (model_path / "weights.npz").exists()
-        or (model_path / "model.safetensors.index.json").exists()
-        or any(model_path.glob("*.safetensors"))
-    ):
-        raise ValueError(f"Model '{label}' is missing MLX weights.")
 
     return model_path
 

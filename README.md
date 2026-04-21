@@ -59,11 +59,12 @@ If you want a different rewrite mode:
 dwhisper run ./meeting.wav --post-model glm-4.1v --post-mode summary
 ```
 
-Examples of usable post-process model names include `glm-4.1v`, `llava-next`, `local-mm-model`, or any other local model name exposed through an OpenAI-compatible endpoint. Daydream Whisper does not hardcode a specific model family.
+Examples of usable post-process model names include `glm-4.1v`, `llava-next`, `Qwen3-4B-4bit`, `local-mm-model`, or any other local model name exposed through an OpenAI-compatible endpoint. Daydream Whisper does not hardcode a specific model family.
 
 ## What It Does
 
-- Runs local Whisper models through MLX on Apple Silicon
+- Runs local Whisper models through `mlx-whisper` on Apple Silicon
+- Supports non-Whisper ASR checkpoints like `mlx-community/Qwen3-ASR-1.7B-4bit` for file transcription through `mlx-audio`
 - Transcribes files to `text`, `json`, `srt`, `vtt`, or `verbose_json`
 - Listens to the microphone in realtime
 - Supports profiles, vocabulary rules, and transcript cleanup rules
@@ -84,6 +85,7 @@ Examples of usable post-process model names include `glm-4.1v`, `llava-next`, `l
 - Python `3.14+`
 - `ffmpeg` for MP3, M4A, and other compressed formats
 - `portaudio` for microphone capture via `sounddevice`
+- Optional: `mlx-audio` for non-Whisper ASR models such as Qwen3-ASR, Parakeet, or SenseVoice
 
 ## Install And Uninstall
 
@@ -99,6 +101,7 @@ What the installer does:
 - clones or updates `~/Daydream-Whisper`
 - recreates an isolated `~/Daydream-Whisper/.venv`
 - installs the package inside that isolated environment
+- tries to install the optional `asr-extras` set so `mlx-audio` models work out of the box
 - creates `~/.local/bin/dwhisper`
 - pulls `whisper:base` as a starter model
 
@@ -116,8 +119,10 @@ cd Daydream-Whisper
 python3.14 -m venv .venv
 source .venv/bin/activate
 pip install -U pip setuptools wheel
-pip install -e .
+pip install -e ".[asr-extras]"
 ```
+
+If you only want Whisper and do not need Qwen3-ASR / Parakeet / SenseVoice, `pip install -e .` is also valid.
 
 ### Run from a repo checkout
 
@@ -144,8 +149,8 @@ The uninstaller is intentionally conservative:
 
 | Command | Purpose | Notes |
 | --- | --- | --- |
-| `dwhisper pull <model>` | Download a model or register a local reference | Supports aliases, HF repo IDs, and local paths |
-| `dwhisper list` | Show downloaded and discovered models | Includes registered local models |
+| `dwhisper pull <model>` | Download a model or register a local reference | Supports Whisper and non-Whisper ASR aliases, HF repo IDs, and local paths |
+| `dwhisper list` | Show downloaded and discovered models | Includes registered local ASR models |
 | `dwhisper rm <model>` | Remove a cached model | Add `--force` to skip prompt |
 | `dwhisper show <model>` | Print local model metadata | Useful for debugging model directories |
 | `dwhisper models` | List built-in aliases | Shows local vs Hugging Face source |
@@ -164,6 +169,7 @@ It checks:
 
 - Python version
 - `mlx-whisper` and MLX device availability
+- optional `mlx-audio` availability for non-Whisper ASR models
 - `sounddevice` / PortAudio
 - visible input devices
 - writable `~/.dwhisper` home
@@ -658,13 +664,13 @@ Common starting points:
 
 Daydream Whisper accepts:
 
-- built-in aliases like `whisper:base`
-- full Hugging Face repo IDs like `mlx-community/whisper-base-mlx`
+- built-in aliases like `whisper:base` and `qwen3-asr`
+- full Hugging Face repo IDs like `mlx-community/whisper-base-mlx` or `mlx-community/Qwen3-ASR-1.7B-4bit`
 - `hf.co/...` references
-- local Whisper MLX model directories
-- local bundle roots that embed a Whisper checkpoint in a subdirectory
+- local ASR model directories
+- local bundle roots that embed a supported ASR checkpoint in a subdirectory
 
-This means you can point `dwhisper` at either a plain Whisper directory or a larger local app bundle that contains a speech submodel.
+This means you can point `dwhisper` at either a plain Whisper / Qwen3-ASR model directory or a larger local app bundle that contains a supported speech submodel.
 
 ### 6. End-to-end example: pull from Hugging Face, use locally, then connect shandianshuo
 
@@ -751,20 +757,45 @@ If the app only asks for Base URL and API Key, that is usually enough and the se
 
 If you specifically want a Qwen-style backend example, the current support boundary matters:
 
-- `dwhisper` still uses Whisper as the first-stage ASR engine on `transcribe`, `listen`, and `/v1/audio/*`
+- `mlx-community/Qwen3-ASR-1.7B-4bit` is supported for file transcription in `dwhisper transcribe`
 - `Qwen3-4B-4bit` fits naturally as the second-stage post-process backend
-- `Qwen3-ASR-1.7B-4bit` is not a drop-in replacement for the built-in Whisper ASR path today
+- realtime `listen` and built-in `serve` still require `mlx-whisper` models today
 
 Supported `dwhisper` setup:
 
-1. Keep Whisper for speech recognition.
-2. Use `Qwen3-4B-4bit` as the post-process model.
-3. Expose `dwhisper serve` to apps like shandianshuo.
+1. Install the non-Whisper ASR extra.
+2. Use `mlx-community/Qwen3-ASR-1.7B-4bit` for file transcription.
+3. Optionally use `Qwen3-4B-4bit` as the post-process model.
+
+Install the extra first:
+
+```bash
+pip install -e ".[asr-extras]"
+pip install mlx-lm
+```
+
+Pull the ASR model:
+
+```bash
+dwhisper pull qwen3-asr
+```
+
+The built-in alias resolves to:
+
+```text
+mlx-community/Qwen3-ASR-1.7B-4bit
+```
+
+Basic file transcription:
+
+```bash
+dwhisper transcribe ./meeting.wav --model qwen3-asr
+```
 
 Example config with an in-process MLX backend:
 
 ```yaml
-model: whisper:large-v3-turbo
+model: qwen3-asr
 
 postprocess:
   enabled: true
@@ -772,27 +803,15 @@ postprocess:
   backend: mlx
   mode: clean
   timeout: 60
-
-serve:
-  host: 127.0.0.1
-  port: 11500
-  preload: true
-```
-
-You will also need `mlx-lm` for the local MLX text backend:
-
-```bash
-pip install mlx-lm
 ```
 
 Replace `Qwen/Qwen3-4B-4bit` with the exact MLX model ID or local path you actually installed.
 
-Equivalent one-shot serve command:
+Equivalent one-shot file command:
 
 ```bash
-dwhisper serve \
-  --model whisper:large-v3-turbo \
-  --preload \
+dwhisper transcribe ./meeting.wav \
+  --model qwen3-asr \
   --post-backend mlx \
   --post-model Qwen/Qwen3-4B-4bit \
   --post-mode clean
@@ -801,9 +820,8 @@ dwhisper serve \
 If you already expose `Qwen3-4B-4bit` through an OpenAI-compatible HTTP service, use `postprocess.backend: http` plus `postprocess.base_url`, or the CLI equivalent:
 
 ```bash
-dwhisper serve \
-  --model whisper:large-v3-turbo \
-  --preload \
+dwhisper transcribe ./meeting.wav \
+  --model qwen3-asr \
   --post-backend http \
   --post-model Qwen3-4B-4bit \
   --post-url http://127.0.0.1:11435/v1 \
@@ -812,14 +830,17 @@ dwhisper serve \
 
 What this gives you:
 
-- Whisper handles speech recognition
+- `Qwen3-ASR-1.7B-4bit` handles file-based speech recognition
 - `Qwen3-4B-4bit` can clean transcript text with `/v1/text/clean`
 - it can summarize transcripts with `/v1/text/summary`
 - it can turn transcripts into notes with `/v1/text/meeting-notes`
 - it can normalize speaker labels with `/v1/text/speakers`
 - long text routes can stream over SSE with `"stream": true`
 
-If you already run an external stack where `Qwen3-ASR-1.7B-4bit` performs speech recognition and `Qwen3-4B-4bit` performs rewrite/summary, treat that as a separate OpenAI-compatible service. `dwhisper` itself does not currently swap its `/v1/audio/*` speech backend from Whisper to Qwen3-ASR.
+Current limitation:
+
+- `dwhisper listen` still only supports `mlx-whisper` models
+- `dwhisper serve` still only wraps `mlx-whisper` models on `/v1/audio/*`
 
 For apps like (https://shandianshuo.cn), the practical `dwhisper` values are still:
 
@@ -831,7 +852,8 @@ Model: whisper:large-v3-turbo
 
 That means:
 
-- speech input still goes through Whisper
+- app-side live / HTTP speech input still goes through Whisper today
+- file-based local transcription can use `qwen3-asr`
 - text cleanup / summary / meeting notes can go through `Qwen3-4B-4bit`
 
 ### 8. Production-oriented serving
@@ -875,7 +897,7 @@ No. Daydream Whisper uses `dwhisper`. It does not install or expose `daydream`.
 
 ### Can I use a generic multimodal model directly as the ASR model?
 
-Not in the current architecture. Whisper is still the speech recognition engine. A text or multimodal model can be used after Whisper as an optional cleanup or formatting layer.
+Not through the built-in realtime / HTTP server path. `dwhisper` now supports non-Whisper MLX ASR models for file transcription through `mlx-audio`, but `listen` and `serve` still use `mlx-whisper`. Text or multimodal models remain the optional second-stage cleanup / formatting layer.
 
 ### Does post-processing require a specific model family?
 
@@ -977,7 +999,7 @@ dwhisper run ./meeting.wav --post-model glm-4.1v
 dwhisper run ./meeting.wav --post-model glm-4.1v --post-mode summary
 ```
 
-可接入的模型不限定某一个家族。只要你的本地文本模型或多模态模型提供 OpenAI 兼容接口，都可以作为第二阶段后处理层。
+可接入的模型不限定某一个家族。只要你的本地文本模型或多模态模型提供 OpenAI 兼容接口，都可以作为第二阶段后处理层，例如 `Qwen3-4B-4bit`。
 
 ## 为什么命令必须是 `dwhisper`
 
@@ -988,7 +1010,8 @@ dwhisper run ./meeting.wav --post-model glm-4.1v --post-mode summary
 
 ## 功能概览
 
-- 本地 MLX Whisper 语音识别
+- 本地 `mlx-whisper` 语音识别
+- 通过 `mlx-audio` 支持 `mlx-community/Qwen3-ASR-1.7B-4bit` 这类非 Whisper ASR 模型做文件转录
 - 文件转录输出 `text`、`json`、`srt`、`vtt`、`verbose_json`
 - 实时麦克风听写
 - profile、术语词汇表、清洗规则
@@ -1010,6 +1033,7 @@ zsh /tmp/dwhisper-install.sh
 - clone 或更新 `~/Daydream-Whisper`
 - 重建隔离的 `~/Daydream-Whisper/.venv`
 - 安装 `dwhisper`
+- 尝试安装可选的 `asr-extras`，让 `mlx-audio` 模型开箱即用
 - 创建 `~/.local/bin/dwhisper`
 - 默认拉取 `whisper:base`
 
@@ -1027,8 +1051,10 @@ cd Daydream-Whisper
 python3.14 -m venv .venv
 source .venv/bin/activate
 pip install -U pip setuptools wheel
-pip install -e .
+pip install -e ".[asr-extras]"
 ```
+
+如果你只想用 Whisper，不需要 `Qwen3-ASR` / `Parakeet` / `SenseVoice`，那 `pip install -e .` 也可以。
 
 ### 卸载
 
@@ -1048,8 +1074,8 @@ zsh /tmp/dwhisper-uninstall.sh
 
 | 命令 | 用途 | 说明 |
 | --- | --- | --- |
-| `dwhisper pull <model>` | 下载模型或注册本地模型 | 支持别名、HF repo、本地路径 |
-| `dwhisper list` | 查看已下载和已发现模型 | 包括本地注册模型 |
+| `dwhisper pull <model>` | 下载模型或注册本地模型 | 支持 Whisper 与非 Whisper ASR 别名、HF repo、本地路径 |
+| `dwhisper list` | 查看已下载和已发现模型 | 包括本地注册 ASR 模型 |
 | `dwhisper rm <model>` | 删除本地缓存模型 | 可加 `--force` |
 | `dwhisper show <model>` | 查看模型元数据 | 适合调试模型目录 |
 | `dwhisper models` | 查看内置别名 | 会显示来源 |
@@ -1072,6 +1098,7 @@ dwhisper doctor
 
 - Python 版本
 - `mlx-whisper` 与 MLX 设备
+- 可选的 `mlx-audio` 是否可用
 - `sounddevice` / PortAudio
 - 当前可见输入设备
 - `~/.dwhisper` home 是否可写
@@ -1566,13 +1593,13 @@ dwhisper serve \
 
 支持：
 
-- 内置别名，如 `whisper:base`
+- 内置别名，如 `whisper:base`、`qwen3-asr`
 - 完整 Hugging Face repo ID
 - `hf.co/...`
-- 本地 Whisper MLX 目录
-- 含有 Whisper 子目录的本地 bundle root
+- 本地 ASR 模型目录
+- 含有受支持语音子模型的本地 bundle root
 
-这意味着你既可以给它一个纯 Whisper 模型目录，也可以给它一个更大的本地应用包，只要包里嵌着 Whisper 语音子模型。
+这意味着你既可以给它一个纯 Whisper / Qwen3-ASR 模型目录，也可以给它一个更大的本地应用包，只要包里嵌着受支持的语音子模型。
 
 ### 6. 实操示例：从 Hugging Face 拉模型，到本地使用，再到接入闪电说
 
@@ -1659,20 +1686,45 @@ Model: whisper:large-v3-turbo
 
 如果你想在 README 里看到一个更具体的 Qwen 组合示例，先要明确当前支持边界：
 
-- `dwhisper` 自己的 `transcribe`、`listen`、`/v1/audio/*` 第一阶段 ASR 仍然固定是 Whisper
+- `mlx-community/Qwen3-ASR-1.7B-4bit` 现在已经支持用在 `dwhisper transcribe` 的文件转录里
 - `Qwen3-4B-4bit` 很适合作为第二阶段后处理后端
-- `Qwen3-ASR-1.7B-4bit` 目前不能直接替换 `dwhisper` 内建的 Whisper 主识别链路
+- `listen` 和内建 `serve` 目前仍然限制在 `mlx-whisper` 模型
 
 当前 `dwhisper` 里真正可落地的配置方式是：
 
-1. 语音识别继续用 Whisper
-2. 文本后处理改成 `Qwen3-4B-4bit`
-3. 再把 `dwhisper serve` 暴露给闪电说这类 app
+1. 先安装非 Whisper ASR 依赖
+2. 用 `mlx-community/Qwen3-ASR-1.7B-4bit` 做文件转录
+3. 可选地把文本后处理改成 `Qwen3-4B-4bit`
+
+先安装依赖：
+
+```bash
+pip install -e ".[asr-extras]"
+pip install mlx-lm
+```
+
+先拉模型：
+
+```bash
+dwhisper pull qwen3-asr
+```
+
+内置别名 `qwen3-asr` 当前对应：
+
+```text
+mlx-community/Qwen3-ASR-1.7B-4bit
+```
+
+最简单的文件转录：
+
+```bash
+dwhisper transcribe ./meeting.wav --model qwen3-asr
+```
 
 用本地 MLX 后端的配置示例：
 
 ```yaml
-model: whisper:large-v3-turbo
+model: qwen3-asr
 
 postprocess:
   enabled: true
@@ -1680,27 +1732,15 @@ postprocess:
   backend: mlx
   mode: clean
   timeout: 60
-
-serve:
-  host: 127.0.0.1
-  port: 11500
-  preload: true
-```
-
-这个本地 MLX 文本后端还需要先安装 `mlx-lm`：
-
-```bash
-pip install mlx-lm
 ```
 
 把 `Qwen/Qwen3-4B-4bit` 换成你实际安装的 MLX 模型 ID 或本地模型路径即可。
 
-等价的一次性启动命令：
+等价的一次性文件命令：
 
 ```bash
-dwhisper serve \
-  --model whisper:large-v3-turbo \
-  --preload \
+dwhisper transcribe ./meeting.wav \
+  --model qwen3-asr \
   --post-backend mlx \
   --post-model Qwen/Qwen3-4B-4bit \
   --post-mode clean
@@ -1709,9 +1749,8 @@ dwhisper serve \
 如果你本来就是通过 OpenAI 兼容 HTTP 服务暴露 `Qwen3-4B-4bit`，那就把 `postprocess.backend` 改成 `http`，再加上 `postprocess.base_url`；对应 CLI 写法例如：
 
 ```bash
-dwhisper serve \
-  --model whisper:large-v3-turbo \
-  --preload \
+dwhisper transcribe ./meeting.wav \
+  --model qwen3-asr \
   --post-backend http \
   --post-model Qwen3-4B-4bit \
   --post-url http://127.0.0.1:11435/v1 \
@@ -1720,16 +1759,19 @@ dwhisper serve \
 
 这套配置能提供的能力：
 
-- Whisper 负责语音转文字
+- `Qwen3-ASR-1.7B-4bit` 负责文件语音转文字
 - `Qwen3-4B-4bit` 可以处理 `/v1/text/clean` 做文本清洗
 - 可以处理 `/v1/text/summary` 做摘要
 - 可以处理 `/v1/text/meeting-notes` 做会议纪要整理
 - 可以处理 `/v1/text/speakers` 做说话人格式整理
 - 长文本场景可以对 `/v1/text/*` 加 `"stream": true` 走 SSE 流式返回
 
-如果你已经在外部单独运行了一套 `Qwen3-ASR-1.7B-4bit` 负责语音识别、`Qwen3-4B-4bit` 负责摘要/改写的服务，那应该把它视为另一套独立的 OpenAI 兼容服务。`dwhisper` 当前不会把自己的 `/v1/audio/*` 语音后端从 Whisper 切换成 Qwen3-ASR。
+当前限制：
 
-对于 (https://shandianshuo.cn) 这类 app，当前在 `dwhisper` 这边的实际填写仍然建议是：
+- `dwhisper listen` 还只支持 `mlx-whisper` 模型
+- `dwhisper serve` 的 `/v1/audio/*` 目前也还只包 `mlx-whisper` 模型
+
+对于 [闪电说](https://shandianshuo.cn) 这类 app，当前在 `dwhisper` 这边的实际填写仍然建议是：
 
 ```text
 Base URL: http://127.0.0.1:11500/v1
@@ -1739,7 +1781,8 @@ Model: whisper:large-v3-turbo
 
 这意味着：
 
-- 语音输入仍然走 Whisper
+- app 侧实时 / HTTP 语音输入目前仍然走 Whisper
+- 本地文件转录可以改成 `qwen3-asr`
 - 文字清洗、摘要、纪要整理可以走 `Qwen3-4B-4bit`
 
 ### 8. 面向集成的服务端参数
@@ -1783,7 +1826,7 @@ dwhisper serve \
 
 ### 多模态模型能直接当 ASR 模型跑吗？
 
-当前架构不支持。语音识别主链路仍然固定是 Whisper。多模态模型是第二阶段文本后处理层，不直接替代 Whisper。
+不能直接替代内建的实时 / 服务端主链路。`dwhisper` 现在已经能通过 `mlx-audio` 支持非 Whisper ASR 模型做文件转录，但 `listen` 和 `serve` 目前仍然走 `mlx-whisper`。多模态模型依旧是第二阶段文本后处理层，不直接替代主识别链路。
 
 ### 后处理一定要某个特定模型家族吗？
 

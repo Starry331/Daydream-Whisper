@@ -237,7 +237,7 @@ def cli():
 @click.argument("model")
 @_handle_errors
 def pull(model: str) -> None:
-    """Download a Whisper model from Hugging Face."""
+    """Download an ASR model from Hugging Face."""
     from dwhisper.models import pull_model
 
     pull_model(model)
@@ -246,7 +246,7 @@ def pull(model: str) -> None:
 @cli.command(name="list")
 @_handle_errors
 def list_command() -> None:
-    """List downloaded and discovered Whisper models."""
+    """List downloaded and discovered ASR models."""
     from dwhisper.models import list_models
 
     list_models()
@@ -267,7 +267,7 @@ def rm(model: str, force: bool) -> None:
 @click.argument("model")
 @_handle_errors
 def show(model: str) -> None:
-    """Show local metadata for a Whisper model."""
+    """Show local metadata for an ASR model."""
     from dwhisper.models import show_model
 
     show_model(model)
@@ -470,8 +470,8 @@ def transcribe(
     output_path: str | None,
     verbose: bool,
 ) -> None:
-    """Transcribe an audio file with MLX Whisper."""
-    from dwhisper.transcriber import TranscribeOptions, WhisperTranscriber
+    """Transcribe an audio file with a local MLX ASR model."""
+    from dwhisper.transcriber import TranscribeOptions, build_transcriber
 
     selected_profile = _load_selected_profile(profile or get_default_profile())
     profile_transcribe = selected_profile.transcribe if selected_profile is not None else {}
@@ -551,7 +551,7 @@ def transcribe(
     if verbose:
         err_console.print(render_transcription_progress(Path(audio_file).name))
 
-    transcriber = WhisperTranscriber(model)
+    transcriber = build_transcriber(model)
     try:
         result = transcriber.transcribe_file(audio_file, options=options)
         _write_output(result.render(output_format.lower()), output_path)
@@ -694,7 +694,16 @@ def listen(
 ) -> None:
     """Transcribe microphone input in realtime."""
     from dwhisper.realtime import RealtimeConfig, run_listen_session
+    from dwhisper.registry import BACKEND_MLX_AUDIO, detect_backend
     from dwhisper.transcriber import TranscribeOptions
+
+    if detect_backend(model) == BACKEND_MLX_AUDIO:
+        raise click.UsageError(
+            f"Realtime `listen` only supports mlx-whisper models right now. "
+            f"'{model}' routes to the mlx-audio backend, which doesn't "
+            f"expose a streaming API yet. Use `dwhisper transcribe` for file "
+            f"input, or pass a Whisper model (e.g. `-m whisper:base`)."
+        )
 
     selected_profile = _load_selected_profile(profile or get_default_profile())
     profile_transcribe = selected_profile.transcribe if selected_profile is not None else {}
@@ -897,7 +906,16 @@ def serve(
     postprocess_max_tokens: int | None,
 ) -> None:
     """Serve a speech-to-text HTTP API for local dictation and transcription apps."""
+    from dwhisper.registry import BACKEND_MLX_AUDIO, detect_backend
     from dwhisper.server import start_server
+
+    if detect_backend(model) == BACKEND_MLX_AUDIO:
+        raise click.UsageError(
+            f"`serve` currently only supports mlx-whisper models. '{model}' "
+            f"routes to the mlx-audio backend, which the HTTP server does not "
+            f"wrap yet. Pass a Whisper model (e.g. `-m whisper:large-v3-turbo`), "
+            f"or use `dwhisper transcribe` for file-based inference."
+        )
 
     shortcut_model = with_postprocess_model.strip() if with_postprocess_model else None
     resolved_postprocess = bool(postprocess or shortcut_model)

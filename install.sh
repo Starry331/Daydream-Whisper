@@ -109,7 +109,14 @@ install_python_env() {
     print "  Creating isolated virtual environment..."
     "$PYTHON_CMD" -m venv --clear "$INSTALL_DIR/.venv"
     "$INSTALL_DIR/.venv/bin/python" -m pip install --upgrade pip
-    "$INSTALL_DIR/.venv/bin/pip" install -e "$INSTALL_DIR"
+    # The ``asr-extras`` extra pulls in mlx-audio so non-Whisper models
+    # (Qwen3-ASR, Parakeet, SenseVoice, …) work out of the box. If the
+    # extra fails to resolve for any reason (e.g. network hiccup), fall
+    # back to the base install so Whisper still works.
+    if ! "$INSTALL_DIR/.venv/bin/pip" install -e "${INSTALL_DIR}[asr-extras]"; then
+        print_warn "Could not install mlx-audio extras; falling back to Whisper-only install."
+        "$INSTALL_DIR/.venv/bin/pip" install -e "$INSTALL_DIR"
+    fi
     print_step "Installed Python dependencies"
 }
 
@@ -176,7 +183,51 @@ persist_launcher_dir_on_path() {
     fi
 }
 
+cleanup_legacy_daydream_path() {
+    # The predecessor project (Daydream-cli, LLM-era) prepended its full venv
+    # bin to $PATH, which shadows python/python3/pip for any tool launched
+    # from a new shell. Detect the legacy block and strip only the PATH
+    # export — preserve any other exports (e.g. HF_TOKEN) the user added
+    # inside the block.
+    local rc_file
+    local cleaned=0
+    for rc_file in "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+        [[ -f "$rc_file" ]] || continue
+        grep -Fq "# >>> daydream >>>" "$rc_file" 2>/dev/null || continue
+        grep -Fq "Daydream-cli/.venv/bin" "$rc_file" 2>/dev/null || continue
+        cp "$rc_file" "${rc_file}.dwhisper-backup.$(date +%Y%m%d%H%M%S)"
+        # Delete just the offending export lines inside the legacy block.
+        # Leaves the marker lines and any other exports intact, so if the
+        # user kept (say) HF_TOKEN here it survives.
+        python3 - "$rc_file" <<'PY'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+lines = path.read_text().splitlines(keepends=True)
+out, inside = [], False
+for line in lines:
+    if "# >>> daydream >>>" in line:
+        inside = True
+        out.append(line)
+        continue
+    if "# <<< daydream <<<" in line:
+        inside = False
+        out.append(line)
+        continue
+    if inside and re.match(r'\s*export\s+PATH=.*Daydream-cli/\.venv/bin', line):
+        continue
+    out.append(line)
+path.write_text("".join(out))
+PY
+        print_step "Cleaned legacy Daydream-cli PATH entry from $(basename "$rc_file") (backup saved)"
+        cleaned=1
+    done
+    if (( cleaned )); then
+        print "    ${DIM}The old daydream CLI venv was shadowing python/python3/pip — it's now gone from new shells.${RESET}"
+    fi
+}
+
 install_launcher() {
+    cleanup_legacy_daydream_path
     mkdir -p "$LAUNCHER_DIR"
     ln -sf "$INSTALL_DIR/.venv/bin/dwhisper" "$LAUNCHER_DIR/dwhisper"
     print_step "Installed launcher at ${LAUNCHER_DIR}/dwhisper"

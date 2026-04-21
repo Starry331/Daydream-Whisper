@@ -96,6 +96,23 @@ def check_mlx_lm() -> DoctorCheck:
     )
 
 
+def check_mlx_audio() -> DoctorCheck:
+    ok, err = _try_import("mlx_audio.stt.utils")
+    if ok:
+        return DoctorCheck(
+            name="mlx-audio (non-Whisper ASR)",
+            status="ok",
+            message="installed",
+        )
+    return DoctorCheck(
+        name="mlx-audio (non-Whisper ASR)",
+        status="warn",
+        message=f"not installed: {err}",
+        hint="Optional. Install with `pip install mlx-audio` to use Qwen3-ASR, "
+        "Parakeet, SenseVoice and other non-Whisper speech models.",
+    )
+
+
 def check_mlx_metal() -> DoctorCheck:
     ok, err = _try_import("mlx.core")
     if not ok:
@@ -383,6 +400,7 @@ DEFAULT_CHECKS: tuple[Callable[[], DoctorCheck], ...] = (
     check_disk_space,
     check_cached_models,
     check_mlx_lm,
+    check_mlx_audio,
     check_postprocess,
 )
 

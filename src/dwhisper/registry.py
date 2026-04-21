@@ -1,7 +1,15 @@
-"""Model name registry for local and Hugging Face Whisper checkpoints."""
+"""Model name registry for local and Hugging Face ASR checkpoints.
+
+Two ASR backends are supported:
+
+- ``mlx-whisper`` — the original Whisper MLX family (tiny/base/.../large-v3-turbo).
+- ``mlx-audio``   — Qwen3-ASR and similar non-Whisper speech models that ship
+  through the ``mlx-audio`` package.
+"""
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -27,7 +35,33 @@ BUILTIN_REGISTRY: dict[str, dict[str, str]] = {
         "large-v3-4bit": "mlx-community/whisper-large-v3-mlx-q4",
         "large-v3-8bit": "mlx-community/whisper-large-v3-mlx-8bit",
     },
+    "qwen3-asr": {
+        "default": "mlx-community/Qwen3-ASR-1.7B-4bit",
+        "1.7b-4bit": "mlx-community/Qwen3-ASR-1.7B-4bit",
+    },
 }
+
+# Known ASR backend names.
+BACKEND_MLX_WHISPER = "mlx-whisper"
+BACKEND_MLX_AUDIO = "mlx-audio"
+
+# Explicit backend tag per registry family. Families not listed here default
+# to ``BACKEND_MLX_WHISPER`` (the historical behavior).
+BACKEND_BY_FAMILY: dict[str, str] = {
+    "whisper": BACKEND_MLX_WHISPER,
+    "whisper-quantized": BACKEND_MLX_WHISPER,
+    "qwen3-asr": BACKEND_MLX_AUDIO,
+}
+
+# Substring markers used to route unregistered HF repos / local dirs to the
+# mlx-audio backend when no explicit family tag is available. Lowercase.
+_MLX_AUDIO_NAME_MARKERS: tuple[str, ...] = (
+    "qwen3-asr",
+    "parakeet",
+    "sensevoice",
+    "moonshine",
+    "paraformer",
+)
 
 MODEL_CONFIG_FILES = ("config.json",)
 MODEL_MARKER_FILES = (
@@ -165,7 +199,10 @@ def _is_direct_local_model_dir(path: Path) -> bool:
         return False
     if not isinstance(config, dict):
         return False
-    return str(config.get("model_type", "")).lower() == "whisper"
+    # Accept any checkpoint that has a parseable config.json alongside weights.
+    # This covers non-Whisper ASR backends (Qwen3-ASR, Parakeet, SenseVoice…)
+    # which have their own config shapes and no mel_filters.npz marker.
+    return True
 
 
 def resolve_local_model_dir(path: Path) -> Path | None:
@@ -462,6 +499,70 @@ def reverse_lookup_all(repo_id: str) -> list[str]:
             if short_name:
                 names.append(short_name)
     return names
+
+
+def _read_model_type(path: Path) -> Optional[str]:
+    """Return the ``model_type`` field from config.json if readable."""
+    config_path = path / "config.json"
+    if not config_path.exists():
+        return None
+    try:
+        with config_path.open("r", encoding="utf-8") as handle:
+            config = json.load(handle)
+    except Exception:
+        return None
+    if not isinstance(config, dict):
+        return None
+    value = config.get("model_type")
+    if isinstance(value, str) and value.strip():
+        return value.strip().lower()
+    return None
+
+
+def detect_backend(name: str) -> str:
+    """Return the ASR backend name (``mlx-whisper`` or ``mlx-audio``) for *name*.
+
+    Resolution order:
+
+    1. Explicit family tag in :data:`BACKEND_BY_FAMILY`.
+    2. User registry family tag (same map, merged).
+    3. Substring match against :data:`_MLX_AUDIO_NAME_MARKERS` on the basename
+       of the resolved target (HF repo or local path).
+    4. ``model_type`` inside the target's ``config.json`` — anything other
+       than ``whisper`` routes to mlx-audio.
+    5. Default: mlx-whisper (historical behavior).
+
+    ``name`` may be any of: family alias (``whisper``), family:variant
+    (``qwen3-asr:1.7b-4bit``), HF repo ID (``mlx-community/…``), or a local
+    path.
+    """
+    raw = name.strip()
+    if not raw:
+        return BACKEND_MLX_WHISPER
+
+    # Step 1 & 2 — family lookup on short aliases (no slash).
+    if "/" not in raw and not _looks_like_local_path(raw):
+        family = raw.split(":", 1)[0].lower()
+        if family in BACKEND_BY_FAMILY:
+            return BACKEND_BY_FAMILY[family]
+
+    # Normalize HF URLs down to owner/repo for consistent substring matching.
+    normalized = normalize_hf_reference(raw)
+    basename = normalized.rsplit("/", 1)[-1].lower()
+    for marker in _MLX_AUDIO_NAME_MARKERS:
+        if marker in basename:
+            return BACKEND_MLX_AUDIO
+
+    # Step 4 — inspect config.json on disk if available.
+    candidate = Path(normalized).expanduser()
+    if candidate.is_dir():
+        target = resolve_local_model_dir(candidate)
+        if target is not None:
+            model_type = _read_model_type(target)
+            if model_type is not None:
+                return BACKEND_MLX_WHISPER if "whisper" in model_type else BACKEND_MLX_AUDIO
+
+    return BACKEND_MLX_WHISPER
 
 
 def list_available() -> list[tuple[str, str, str]]:

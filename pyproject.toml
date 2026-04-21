@@ -13,6 +13,14 @@ dependencies = [
     "numpy>=1.24",
 ]
 
+[project.optional-dependencies]
+# Non-Whisper ASR backends (Qwen3-ASR, Parakeet, SenseVoice, …) go through
+# the ``mlx-audio`` package. Kept as an optional extra so the base install
+# stays minimal for users who only want Whisper.
+asr-extras = [
+    "mlx-audio>=0.3.0",
+]
+
 [project.scripts]
 dwhisper = "dwhisper.cli:cli"
 
